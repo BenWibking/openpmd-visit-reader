@@ -58,15 +58,6 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   std::cout << "This file uses openPMD-standard version " << series_.openPMD()
             << '\n';
 
-#if 0
-  // read attributes
-  std::cout << "Attributes in the root dataset:\n";
-  for (auto const &val : series_.attributes()) {
-    std::cout << '\t' << val << '\n';
-  }
-  std::cout << '\n';
-#endif
-
   // read iteration count
   std::cout << "This file contains " << series_.iterations.size()
             << " iterations:";
@@ -150,34 +141,12 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
     openPMD::Mesh const &mesh = mesh_tuple.second;
     std::cout << "Reading mesh " << meshname << "\n";
 
-    std::string meshPrefix = std::to_string(iter) + '.' + meshname;
-    std::string axisLabels = "";
-    for (auto const &val : mesh.axisLabels())
-      axisLabels += val + ", ";
-    std::string gridSpacing = "";
-    for (auto const &val : mesh.gridSpacing<float>())
-      gridSpacing += std::to_string(val) + ", ";
-    std::string gridGlobalOffset = "";
-    for (auto const &val : mesh.gridGlobalOffset())
-      gridGlobalOffset += std::to_string(val) + ", ";
-
-    std::cout << meshPrefix << ".geometry - " << mesh.geometry() << '\n'
-              << meshPrefix << ".dataOrder - " << mesh.dataOrder() << '\n'
-              << meshPrefix << ".axisLabels - " << axisLabels << '\n'
-              << meshPrefix << ".gridSpacing - " << gridSpacing << '\n'
-              << meshPrefix << ".gridGlobalOffset - " << gridGlobalOffset
-              << '\n'
-              << meshPrefix << ".gridUnitSI - " << mesh.gridUnitSI() << '\n'
-              << meshPrefix << ".timeOffset - " << mesh.timeOffset<float>()
-              << '\n'
-              << '\n';
-
     avtMeshType mt = AVT_RECTILINEAR_MESH;
     int nblocks = 1; // <-- this must be 1 for MTSD
     int block_origin = 0;
     int spatial_dimension = mesh.axisLabels().size();
     int topological_dimension = spatial_dimension;
-    double *extents = NULL; // TODO: add extents for mesh
+    double *extents = NULL;
 
     AddMeshToMetaData(md, meshname, mt, extents, nblocks, block_origin,
                       spatial_dimension, topological_dimension);
@@ -259,16 +228,11 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
     return 0;
   }
 
-  // get geometry of this mesh
+  // openPMD geometry
   const int ndims = mesh.axisLabels().size();
   std::vector<double> gridSpacing = mesh.gridSpacing<double>();
   std::vector<double> gridOrigin = mesh.gridGlobalOffset();
   std::vector<std::uint64_t> gridExtent = mesh.getExtent();
-
-  // Geometry
-  double origin[3] = {0, 0, 0};  // position x0, y0, z0
-  double spacing[3] = {0, 0, 0}; // dx, dy, dz
-  int dims[3] = {1, 1, 1};       // number of cells + 1
 
   if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
     // in DataOrder::C order, the dimensions are {z, y, x}
@@ -276,6 +240,11 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
     std::reverse(gridOrigin.begin(), gridOrigin.end());
     std::reverse(gridExtent.begin(), gridExtent.end());
   }
+
+  // VTK geometry
+  double origin[3] = {0, 0, 0};  // position x0, y0, z0
+  double spacing[3] = {0, 0, 0}; // dx, dy, dz
+  int dims[3] = {1, 1, 1};       // number of cells + 1
 
   for (int idim = 0; idim < ndims; ++idim) {
     origin[idim] = gridOrigin[idim];
@@ -308,16 +277,8 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
             << '\n';
 
   // TODO(benwibking): loop over chunks and create separate vtkUniformGrids for
-  // each chunk. This is necessary for files with sparse grids (used for AMR
-  // datasets).
-
-#if 0
-  // This does not work...
-  vtkImageData *uniform_grid = vtkImageData::New();
-  uniform_grid->SetOrigin(origin);
-  uniform_grid->SetSpacing(spacing);
-  uniform_grid->SetDimensions(dims);
-#endif
+  // each chunk and assemble into an AMR mesh.
+  // This is necessary for files with sparse grids (also used for AMR datasets).
 
   vtkFloatArray *coords[3];
   for (int idim = 0; idim < 3; ++idim) {
@@ -386,19 +347,18 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timestate, const char *varname) {
   }
 #endif
 
-  //    YOU MUST IMPLEMENT THIS
-  return 0;
+#if 0
+  // example code
+  int ntuples = XXX; // this is the number of entries in the variable.
+  vtkFloatArray *rv = vtkFloatArray::New();
+  rv->SetNumberOfTuples(ntuples);
+  for (int i = 0; i < ntuples; i++) {
+    rv->SetTuple1(i, VAL); // you must determine value for ith entry.
+  }
+  return rv;
+#endif
 
-  // int ntuples = XXX; // this is the number of entries in the variable.
-  // vtkFloatArray *rv = vtkFloatArray::New();
-  // rv->SetNumberOfTuples(ntuples);
-  // for (int i = 0 ; i < ntuples ; i++)
-  // {
-  //      rv->SetTuple1(i, VAL);  // you must determine value for ith entry.
-  // }
-  //
-  // return rv;
-  //
+  return 0;
 }
 
 // ****************************************************************************
