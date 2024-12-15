@@ -6,10 +6,14 @@
 //  avtopenpmdFileFormat.C
 // ****************************************************************************
 
+#include <algorithm>
+#include <cstddef>
 #include <iostream>
 #include <string>
 
 #include <avtDatabaseMetaData.h>
+#include <avtIntervalTree.h>
+#include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
 #include <vtkRectilinearGrid.h>
 #include <vtkStructuredGrid.h>
@@ -329,36 +333,97 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
 //
 // ****************************************************************************
 
-vtkDataArray *avtopenpmdFileFormat::GetVar(int timestate, const char *varname) {
-  // NOTE: example of the parallel read:
-  // https://github.com/openPMD/openPMD-api/blob/c639257322dc15a459fc89107f091a81868e4356/test/ParallelIOTest.cpp#L952
-#if 0
-  // test parallel read
-  openPMD::Series read(name, openPMD::Access::READ_ONLY, MPI_COMM_WORLD,
-    "{\"defer_iteration_parsing\": true}"); // called collectively
-  openPMD::Iteration it = read.iterations[30]; // called collectively
-  it.open(); // called collectively
+vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
+  // get actual iteration index
+  unsigned long long iter = iterationIndex_.at(timeState);
+  std::cout << "GetVar() for iteration " << iter << " and var " << varname
+            << std::endl;
 
-  if (mpi_rank == 0) // independent (any MPI rank can read any chunk, w/ optional extents)
-  {
-    auto E_x = it.meshes["E"]["x"];
-    auto data = E_x.loadChunk<double>(); // this just queues a read operation
-    read.flush(); // this actually reads the data
+  // lookup mesh name and record component name from varname
+  // TODO: implement this
+  std::string meshname = varname;
+  const char *rcname =
+      openPMD::Mesh::MeshRecordComponent::SCALAR; // FIXME: assumes a scalar
+                                                  // mesh
+
+  // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
+  openPMD::Iteration i = series_.iterations[iter];
+  openPMD::Mesh mesh = i.meshes[meshname];
+  openPMD::MeshRecordComponent rcomp = mesh[rcname];
+
+  // get geometry
+  std::vector<std::uint64_t> gridExtent = rcomp.getExtent();
+  if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
+    // in DataOrder::C order, the dimensions are {z, y, x}
+    std::reverse(gridExtent.begin(), gridExtent.end());
   }
-#endif
 
-#if 0
-  // example code
-  int ntuples = XXX; // this is the number of entries in the variable.
-  vtkFloatArray *rv = vtkFloatArray::New();
-  rv->SetNumberOfTuples(ntuples);
-  for (int i = 0; i < ntuples; i++) {
-    rv->SetTuple1(i, VAL); // you must determine value for ith entry.
+  // get number of cells
+  uint64_t ncells = 1;
+  for (auto const &nx : gridExtent) {
+    ncells *= nx;
   }
-  return rv;
-#endif
 
-  return 0;
+  // read data from disk
+  // TODO: need to support either float or double
+  //   (can use std::visit pattern for this)
+  std::shared_ptr<double> opmd_data = rcomp.loadChunk<double>();
+  series_.flush(); // this actually reads the data
+
+  // copy data into VTK buffer
+  vtkDoubleArray *xyz = vtkDoubleArray::New();
+  xyz->SetNumberOfComponents(1);
+  xyz->SetNumberOfTuples(ncells);
+  double *xyz_ptr = xyz->GetPointer(0);
+  double *data_ptr = opmd_data.get();
+
+  if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
+    if (gridExtent.size() == 3) {
+      for (int k = 0; k < gridExtent[2]; k++) {     // z index
+        for (int j = 0; j < gridExtent[1]; j++) {   // y index
+          for (int i = 0; i < gridExtent[0]; i++) { // x index
+            ptrdiff_t c_idx =
+                k + j * gridExtent[2] + i * gridExtent[2] * gridExtent[1];
+            *(xyz_ptr++) = data_ptr[c_idx];
+          }
+        }
+      }
+    } else if (gridExtent.size() == 2) {
+      for (int j = 0; j < gridExtent[1]; j++) {   // y index
+        for (int i = 0; i < gridExtent[0]; i++) { // x index
+          ptrdiff_t c_idx = j + i * gridExtent[1];
+          *(xyz_ptr++) = data_ptr[c_idx];
+        }
+      }
+    }
+  } else if (mesh.dataOrder() == openPMD::Mesh::DataOrder::F) {
+    if (gridExtent.size() == 3) {
+      for (int k = 0; k < gridExtent[2]; k++) {     // z index
+        for (int j = 0; j < gridExtent[1]; j++) {   // y index
+          for (int i = 0; i < gridExtent[0]; i++) { // x index
+            ptrdiff_t f_idx =
+                i + j * gridExtent[0] + k * gridExtent[0] * gridExtent[1];
+            *(xyz_ptr++) = data_ptr[f_idx];
+          }
+        }
+      }
+    } else if (gridExtent.size() == 2) {
+      for (int j = 0; j < gridExtent[1]; j++) {   // y index
+        for (int i = 0; i < gridExtent[0]; i++) { // x index
+          ptrdiff_t f_idx = i + j * gridExtent[0];
+          *(xyz_ptr++) = data_ptr[f_idx];
+        }
+      }
+    }
+  }
+
+  if (gridExtent.size() == 1) {
+    for (int i = 0; i < gridExtent[0]; i++) {
+      *(xyz_ptr++) = data_ptr[i];
+    }
+  }
+
+  return xyz;
 }
 
 // ****************************************************************************
