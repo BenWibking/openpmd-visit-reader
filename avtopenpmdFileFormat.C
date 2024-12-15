@@ -13,6 +13,7 @@
 #include <vtkFloatArray.h>
 #include <vtkRectilinearGrid.h>
 #include <vtkStructuredGrid.h>
+#include <vtkUniformGrid.h>
 #include <vtkUnstructuredGrid.h>
 
 #include <openPMD/openPMD.hpp>
@@ -132,10 +133,13 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
   // NOTE: openPMD's iteration index 'iter' can be an arbitrary number, and can
   // skip numbers. For instance, a dataset can have iterations = {550, 600}.
   unsigned long long iter = iterationIndex_.at(timeState);
-  std::cout << "Populating database metadata for iteration " << iter << "\n";
+  std::cout << "PopulateDatabaseMetaData() for iteration " << iter << "\n";
 
   // open openPMD::Iteration 'iter'
   openPMD::Iteration i = series_.iterations[iter];
+
+  // NOTE: a good reference for understanding how to read OpenPMD files is:
+  // https://github.com/openPMD/openPMD-api/blob/dev/examples/6_dump_filebased_series.cpp
 
   // loop over openPMD::Mesh objects
   std::cout << "Iteration " << iter << " contains " << i.meshes.size()
@@ -156,10 +160,6 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
     std::string gridGlobalOffset = "";
     for (auto const &val : mesh.gridGlobalOffset())
       gridGlobalOffset += std::to_string(val) + ", ";
-    std::string unitDimension = "";
-    for (auto const &val : mesh.unitDimension()) {
-      unitDimension += std::to_string(val) + ", ";
-    }
 
     std::cout << meshPrefix << ".geometry - " << mesh.geometry() << '\n'
               << meshPrefix << ".dataOrder - " << mesh.dataOrder() << '\n'
@@ -168,7 +168,6 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
               << meshPrefix << ".gridGlobalOffset - " << gridGlobalOffset
               << '\n'
               << meshPrefix << ".gridUnitSI - " << mesh.gridUnitSI() << '\n'
-              << meshPrefix << ".unitDimension - " << unitDimension << '\n'
               << meshPrefix << ".timeOffset - " << mesh.timeOffset<float>()
               << '\n'
               << '\n';
@@ -202,8 +201,8 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
 
     } else { // this openPMD::Mesh contains multiple MeshRecordComponent's
       // NOTE: this object MAY or MAY NOT make sense to treat as a vector.
-      // It probably makes more sense to enroll multiple scalar variables, one per
-      // MeshRecordComponent, and let the user create a vector with
+      // It probably makes more sense to enroll multiple scalar variables, one
+      // per MeshRecordComponent, and let the user create a vector with
       // expressions, if appropriate for the dataset.
 
       for (auto const &rc : mesh) {
@@ -244,9 +243,111 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
 //
 // ****************************************************************************
 
-vtkDataSet *avtopenpmdFileFormat::GetMesh(int timestate, const char *meshname) {
-  //    YOU MUST IMPLEMENT THIS
-  return 0;
+vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
+  // get actual iteration index
+  unsigned long long iter = iterationIndex_.at(timeState);
+  std::cout << "GetMesh() for iteration " << iter << " and mesh " << meshname
+            << "\n";
+
+  // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
+  openPMD::Iteration i = series_.iterations[iter];
+  openPMD::Mesh const &mesh = i.meshes[meshname];
+
+  // check that this is a cartesian mesh
+  if (mesh.geometry() != openPMD::Mesh::Geometry::cartesian) {
+    std::cout << "Unknown openPMD::Mesh geometry. Must be cartesian!\n";
+    return 0;
+  }
+
+  // get geometry of this mesh
+  const int ndims = mesh.axisLabels().size();
+  std::vector<double> gridSpacing = mesh.gridSpacing<double>();
+  std::vector<double> gridOrigin = mesh.gridGlobalOffset();
+  std::vector<std::uint64_t> gridExtent = mesh.getExtent();
+
+  // Geometry
+  double origin[3] = {0, 0, 0};  // position x0, y0, z0
+  double spacing[3] = {0, 0, 0}; // dx, dy, dz
+  int dims[3] = {1, 1, 1};       // number of cells + 1
+
+  if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
+    // in DataOrder::C order, the dimensions are {z, y, x}
+    std::reverse(gridSpacing.begin(), gridSpacing.end());
+    std::reverse(gridOrigin.begin(), gridOrigin.end());
+    std::reverse(gridExtent.begin(), gridExtent.end());
+  }
+
+  for (int idim = 0; idim < ndims; ++idim) {
+    origin[idim] = gridOrigin[idim];
+    spacing[idim] = gridSpacing[idim];
+    dims[idim] = static_cast<int>(gridExtent[idim]) + 1;
+  }
+
+  // debugging output
+  std::string meshPrefix = std::to_string(iter) + '.' + meshname;
+  std::string axisLabels = "";
+  for (auto const &val : mesh.axisLabels())
+    axisLabels += val + ", ";
+  std::string gridSpacing_str = "";
+  for (auto const &val : mesh.gridSpacing<float>())
+    gridSpacing_str += std::to_string(val) + ", ";
+  std::string gridGlobalOffset = "";
+  for (auto const &val : mesh.gridGlobalOffset())
+    gridGlobalOffset += std::to_string(val) + ", ";
+  std::string gridExtent_str = "";
+  for (auto const &val : mesh.getExtent())
+    gridExtent_str += std::to_string(val) + ", ";
+
+  std::cout << meshPrefix << ".geometry - " << mesh.geometry() << '\n'
+            << meshPrefix << ".dataOrder - " << mesh.dataOrder() << '\n'
+            << meshPrefix << ".axisLabels - " << axisLabels << '\n'
+            << meshPrefix << ".gridSpacing - " << gridSpacing_str << '\n'
+            << meshPrefix << ".gridGlobalOffset - " << gridGlobalOffset << '\n'
+            << meshPrefix << ".getExtent - " << gridExtent_str << '\n'
+            << '\n'
+            << '\n';
+
+  // TODO(benwibking): loop over chunks and create separate vtkUniformGrids for
+  // each chunk. This is necessary for files with sparse grids (used for AMR
+  // datasets).
+
+#if 0
+  // This does not work...
+  vtkImageData *uniform_grid = vtkImageData::New();
+  uniform_grid->SetOrigin(origin);
+  uniform_grid->SetSpacing(spacing);
+  uniform_grid->SetDimensions(dims);
+#endif
+
+  vtkFloatArray *coords[3];
+  for (int idim = 0; idim < 3; ++idim) {
+    coords[idim] = vtkFloatArray::New();
+    // initialize with null values
+    coords[idim]->SetNumberOfTuples(1);
+    coords[idim]->SetComponent(0, 0, 0.);
+  }
+
+  // loop over real dimensions
+  for (int idim = 0; idim < ndims; ++idim) {
+    coords[idim]->SetNumberOfTuples(dims[idim]);
+    float *array = static_cast<float *>(coords[idim]->GetVoidPointer(0));
+    // set rectilinear coordinates at nodes of grid
+    for (int idx = 0; idx <= dims[idim]; ++idx) {
+      array[idx] = idx * spacing[idim] + origin[idim];
+    }
+  }
+
+  vtkRectilinearGrid *rgrid = vtkRectilinearGrid::New();
+  rgrid->SetDimensions(dims);
+  rgrid->SetXCoordinates(coords[0]);
+  rgrid->SetYCoordinates(coords[1]);
+  rgrid->SetZCoordinates(coords[2]);
+
+  for (int idim = 0; idim < 3; ++idim) {
+    coords[idim]->Delete();
+  }
+
+  return rgrid;
 }
 
 // ****************************************************************************
@@ -268,12 +369,26 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timestate, const char *meshname) {
 // ****************************************************************************
 
 vtkDataArray *avtopenpmdFileFormat::GetVar(int timestate, const char *varname) {
+  // NOTE: example of the parallel read:
+  // https://github.com/openPMD/openPMD-api/blob/c639257322dc15a459fc89107f091a81868e4356/test/ParallelIOTest.cpp#L952
+#if 0
+  // test parallel read
+  openPMD::Series read(name, openPMD::Access::READ_ONLY, MPI_COMM_WORLD,
+    "{\"defer_iteration_parsing\": true}"); // called collectively
+  openPMD::Iteration it = read.iterations[30]; // called collectively
+  it.open(); // called collectively
+
+  if (mpi_rank == 0) // independent (any MPI rank can read any chunk, w/ optional extents)
+  {
+    auto E_x = it.meshes["E"]["x"];
+    auto data = E_x.loadChunk<double>(); // this just queues a read operation
+    read.flush(); // this actually reads the data
+  }
+#endif
+
   //    YOU MUST IMPLEMENT THIS
   return 0;
 
-  //
-  // If you do have a scalar variable, here is some code that may be helpful.
-  //
   // int ntuples = XXX; // this is the number of entries in the variable.
   // vtkFloatArray *rv = vtkFloatArray::New();
   // rv->SetNumberOfTuples(ntuples);
