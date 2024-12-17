@@ -23,6 +23,7 @@
 #include <openPMD/openPMD.hpp>
 
 #include <DBOptionsAttributes.h>
+#include <DebugStream.h>
 #include <Expression.h>
 #include <InvalidVariableException.h>
 
@@ -55,16 +56,16 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   std::string os_pathsep = "/";
   std::string parent_path = p.parent_path();
   std::string opmd_filepath = parent_path + os_pathsep + opmd_filestring;
-  std::cout << "Reading OpenPMD series: " << opmd_filepath << "\n";
+  debug5 << "Reading OpenPMD series: " << opmd_filepath << "\n";
 
   // open openPMD series
   series_ = openPMD::Series(opmd_filepath, openPMD::Access::READ_ONLY);
-  std::cout << "This file uses openPMD-standard version " << series_.openPMD()
-            << '\n';
+  debug5 << "This file uses openPMD-standard version " << series_.openPMD()
+         << '\n';
 
   // read iteration count
-  std::cout << "This file contains " << series_.iterations.size()
-            << " iterations:";
+  debug5 << "This file contains " << series_.iterations.size()
+         << " iterations:";
   iterationIndex_ = std::vector<unsigned long long>(series_.iterations.size());
 
   // save map from timeState to iteration index
@@ -72,11 +73,11 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   // skip numbers. For instance, a dataset can have iterations = {550, 600}.
   int timeState = 0;
   for (auto const &iter : series_.iterations) {
-    std::cout << "\n\t" << iter.first;
+    debug5 << "\n\t" << iter.first;
     iterationIndex_.at(timeState) = iter.first;
     timeState++;
   }
-  std::cout << '\n';
+  debug5 << '\n';
 }
 
 // ****************************************************************************
@@ -128,7 +129,7 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
   // NOTE: openPMD's iteration index 'iter' can be an arbitrary number, and can
   // skip numbers. For instance, a dataset can have iterations = {550, 600}.
   unsigned long long iter = iterationIndex_.at(timeState);
-  std::cout << "PopulateDatabaseMetaData() for iteration " << iter << "\n";
+  debug5 << "PopulateDatabaseMetaData() for iteration " << iter << "\n";
 
   // open openPMD::Iteration 'iter'
   openPMD::Iteration i = series_.iterations[iter];
@@ -137,13 +138,13 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
   // https://github.com/openPMD/openPMD-api/blob/dev/examples/6_dump_filebased_series.cpp
 
   // loop over openPMD::Mesh objects
-  std::cout << "Iteration " << iter << " contains " << i.meshes.size()
-            << " meshes:\n";
+  debug5 << "Iteration " << iter << " contains " << i.meshes.size()
+         << " meshes:\n";
 
   for (auto const &mesh_tuple : i.meshes) {
     std::string meshname = mesh_tuple.first;
-    openPMD::Mesh const &mesh = mesh_tuple.second;
-    std::cout << "Reading mesh " << meshname << "\n";
+    openPMD::Mesh mesh = mesh_tuple.second;
+    debug5 << "Reading mesh " << meshname << "\n";
 
     avtMeshType mt = AVT_RECTILINEAR_MESH;
     int nblocks = 1; // <-- this must be 1 for MTSD
@@ -162,7 +163,7 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
                          // MeshRecordComponent
       // when there is only one MeshRecordComponent, the name of the variable
       // should be the same as the Mesh
-      std::cout << "Adding scalar variable " << meshname << "\n";
+      debug5 << "Adding scalar variable " << meshname << "\n";
 
       // TODO: read the centering from attributes
       // NOTE: OpenPMD allows for arbitrary centering. Components can be face-
@@ -181,7 +182,7 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
       for (auto const &rc : mesh) {
         // when there are multiple components, we create a hierarchical dataset
         std::string varname = meshname + std::string("/") + rc.first;
-        std::cout << "Adding scalar variable " << varname << "\n";
+        debug5 << "Adding scalar variable " << varname << "\n";
 
         // TODO: read the centering from attributes
         // NOTE: OpenPMD allows for arbitrary centering. Components can be face-
@@ -193,7 +194,7 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
       }
     }
   }
-  std::cout << '\n' << '\n';
+  debug5 << '\n' << '\n';
 }
 
 // ****************************************************************************
@@ -219,16 +220,16 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
 vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
   // get actual iteration index
   unsigned long long iter = iterationIndex_.at(timeState);
-  std::cout << "GetMesh() for iteration " << iter << " and mesh " << meshname
-            << "\n";
+  debug5 << "GetMesh() for iteration " << iter << " and mesh " << meshname
+         << "\n";
 
   // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
   openPMD::Iteration i = series_.iterations[iter];
-  openPMD::Mesh const &mesh = i.meshes[meshname];
+  openPMD::Mesh mesh = i.meshes[meshname];
 
   // check that this is a cartesian mesh
   if (mesh.geometry() != openPMD::Mesh::Geometry::cartesian) {
-    std::cout << "Unknown openPMD::Mesh geometry. Must be cartesian!\n";
+    debug5 << "Unknown openPMD::Mesh geometry. Must be cartesian!\n";
     return 0;
   }
 
@@ -238,8 +239,12 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
   std::vector<double> gridOrigin = mesh.gridGlobalOffset();
   std::vector<std::uint64_t> gridExtent = mesh.getExtent();
 
+  // NOTE: VTK arrays are in Fortran order:
+  // "VTK image data arrays are stored such that the X dimension increases
+  // fastest, followed by Y, followed by Z."
+  // (https://public.kitware.com/pipermail/vtkusers/2016-September/096626.html)
+  // Instead of re-ordering the array, we just flip the axisLabels as needed.
   if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
-    // in DataOrder::C order, the dimensions are {z, y, x}
     std::reverse(gridSpacing.begin(), gridSpacing.end());
     std::reverse(gridOrigin.begin(), gridOrigin.end());
     std::reverse(gridExtent.begin(), gridExtent.end());
@@ -271,14 +276,14 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
   for (auto const &val : mesh.getExtent())
     gridExtent_str += std::to_string(val) + ", ";
 
-  std::cout << meshPrefix << ".geometry - " << mesh.geometry() << '\n'
-            << meshPrefix << ".dataOrder - " << mesh.dataOrder() << '\n'
-            << meshPrefix << ".axisLabels - " << axisLabels << '\n'
-            << meshPrefix << ".gridSpacing - " << gridSpacing_str << '\n'
-            << meshPrefix << ".gridGlobalOffset - " << gridGlobalOffset << '\n'
-            << meshPrefix << ".getExtent - " << gridExtent_str << '\n'
-            << '\n'
-            << '\n';
+  debug5 << meshPrefix << ".geometry - " << mesh.geometry() << '\n'
+         << meshPrefix << ".dataOrder - " << mesh.dataOrder() << '\n'
+         << meshPrefix << ".axisLabels - " << axisLabels << '\n'
+         << meshPrefix << ".gridSpacing - " << gridSpacing_str << '\n'
+         << meshPrefix << ".gridGlobalOffset - " << gridGlobalOffset << '\n'
+         << meshPrefix << ".getExtent - " << gridExtent_str << '\n'
+         << '\n'
+         << '\n';
 
   // TODO(benwibking): loop over chunks and create separate vtkUniformGrids for
   // each chunk and assemble into an AMR mesh.
@@ -336,8 +341,8 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
 vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
   // get actual iteration index
   unsigned long long iter = iterationIndex_.at(timeState);
-  std::cout << "GetVar() for iteration " << iter << " and var " << varname
-            << std::endl;
+  debug5 << "GetVar() for iteration " << iter << " and var " << varname
+         << std::endl;
 
   // lookup mesh name and record component name from varname
   // TODO: implement this
@@ -353,8 +358,13 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
 
   // get geometry
   std::vector<std::uint64_t> gridExtent = rcomp.getExtent();
+
+  // NOTE: VTK arrays are in Fortran order:
+  // "VTK image data arrays are stored such that the X dimension increases
+  // fastest, followed by Y, followed by Z."
+  // (https://public.kitware.com/pipermail/vtkusers/2016-September/096626.html)
+  // Instead of re-ordering the array, we just flip the axisLabels as needed.
   if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
-    // in DataOrder::C order, the dimensions are {z, y, x}
     std::reverse(gridExtent.begin(), gridExtent.end());
   }
 
@@ -364,64 +374,17 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     ncells *= nx;
   }
 
-  // read data from disk
+  // create VTK buffer
   // TODO: need to support either float or double
-  //   (can use std::visit pattern for this)
-  std::shared_ptr<double> opmd_data = rcomp.loadChunk<double>();
-  series_.flush(); // this actually reads the data
-
-  // copy data into VTK buffer
   vtkDoubleArray *xyz = vtkDoubleArray::New();
   xyz->SetNumberOfComponents(1);
   xyz->SetNumberOfTuples(ncells);
   double *xyz_ptr = xyz->GetPointer(0);
-  double *data_ptr = opmd_data.get();
 
-  if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
-    if (gridExtent.size() == 3) {
-      for (int k = 0; k < gridExtent[2]; k++) {     // z index
-        for (int j = 0; j < gridExtent[1]; j++) {   // y index
-          for (int i = 0; i < gridExtent[0]; i++) { // x index
-            ptrdiff_t c_idx =
-                k + j * gridExtent[2] + i * gridExtent[2] * gridExtent[1];
-            *(xyz_ptr++) = data_ptr[c_idx];
-          }
-        }
-      }
-    } else if (gridExtent.size() == 2) {
-      for (int j = 0; j < gridExtent[1]; j++) {   // y index
-        for (int i = 0; i < gridExtent[0]; i++) { // x index
-          ptrdiff_t c_idx = j + i * gridExtent[1];
-          *(xyz_ptr++) = data_ptr[c_idx];
-        }
-      }
-    }
-  } else if (mesh.dataOrder() == openPMD::Mesh::DataOrder::F) {
-    if (gridExtent.size() == 3) {
-      for (int k = 0; k < gridExtent[2]; k++) {     // z index
-        for (int j = 0; j < gridExtent[1]; j++) {   // y index
-          for (int i = 0; i < gridExtent[0]; i++) { // x index
-            ptrdiff_t f_idx =
-                i + j * gridExtent[0] + k * gridExtent[0] * gridExtent[1];
-            *(xyz_ptr++) = data_ptr[f_idx];
-          }
-        }
-      }
-    } else if (gridExtent.size() == 2) {
-      for (int j = 0; j < gridExtent[1]; j++) {   // y index
-        for (int i = 0; i < gridExtent[0]; i++) { // x index
-          ptrdiff_t f_idx = i + j * gridExtent[0];
-          *(xyz_ptr++) = data_ptr[f_idx];
-        }
-      }
-    }
-  }
-
-  if (gridExtent.size() == 1) {
-    for (int i = 0; i < gridExtent[0]; i++) {
-      *(xyz_ptr++) = data_ptr[i];
-    }
-  }
+  // read data from disk into VTK buffer
+  // set offset and extent are set to read the full array
+  rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
+  series_.flush(); // this actually reads the data
 
   return xyz;
 }
