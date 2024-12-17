@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <exception>
 #include <iostream>
 #include <string>
 
