@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <exception>
 #include <iostream>
 #include <string>
 
@@ -168,10 +169,26 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
       std::string varname = openpmd_meshname;
       debug5 << "Adding scalar variable " << varname << "\n";
 
-      // TODO: read the centering from attributes
-      // NOTE: OpenPMD allows for arbitrary centering. Components can be face-
-      // or edge-centered! VisIt centerings: AVT_NODECENT, AVT_ZONECENT,
-      // AVT_UNKNOWN_CENT
+      // read the element centering
+      std::vector<float> centering = mesh.position<float>();
+      // cell-centered == {0.5, 0.5, 0.5}
+      // node-centered == {0, 0, 0}
+      // staggered == {0, 0.5, 0.5}, etc.
+      // We only support cell-centered for now.
+      bool isCellCentered = true;
+      for (int idim = 0; idim < centering.size(); idim++) {
+        isCellCentered = (isCellCentered && (centering[idim] == 0.5));
+      }
+      if (!isCellCentered) {
+        // skip this var
+        debug5 << "Var " << varname << " is not cell-centered (centering is ";
+        for (int idim = 0; idim < centering.size(); idim++) {
+          debug5 << centering[idim] << ",";
+        }
+        debug5 << "). Skipping...\n";
+        continue;
+      }
+
       avtCentering cent = AVT_ZONECENT;
       std::string openpmd_compname = openPMD::MeshRecordComponent::SCALAR;
       varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
@@ -186,13 +203,30 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
       for (auto const &rc : mesh) {
         // when there are multiple components, we create a hierarchical dataset
         std::string openpmd_compname = rc.first;
-        std::string varname = openpmd_meshname + std::string("/") + openpmd_compname;
+        std::string varname =
+            openpmd_meshname + std::string("/") + openpmd_compname;
         debug5 << "Adding scalar variable " << varname << "\n";
 
-        // TODO: read the centering from attributes
-        // NOTE: OpenPMD allows for arbitrary centering. Components can be face-
-        // or edge-centered! VisIt centerings: AVT_NODECENT, AVT_ZONECENT,
-        // AVT_UNKNOWN_CENT
+        // read the element centering
+        std::vector<float> centering = rc.second.position<float>();
+        // cell-centered == {0.5, 0.5, 0.5}
+        // node-centered == {0, 0, 0}
+        // staggered == {0, 0.5, 0.5}, etc.
+        // We only support cell-centered for now.
+        bool isCellCentered = true;
+        for (int idim = 0; idim < centering.size(); idim++) {
+          isCellCentered = (isCellCentered && (centering[idim] == 0.5));
+        }
+        if (!isCellCentered) {
+          // skip this var
+          debug5 << "Var " << varname << " is not cell-centered (centering is ";
+          for (int idim = 0; idim < centering.size(); idim++) {
+            debug5 << centering[idim] << ",";
+          }
+          debug5 << "). Skipping...\n";
+          continue;
+        }
+
         avtCentering cent = AVT_ZONECENT;
         varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
         AddScalarVarToMetaData(md, varname, visit_meshname, cent);
@@ -222,7 +256,8 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
 //
 // ****************************************************************************
 
-vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *visit_meshname) {
+vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
+                                          const char *visit_meshname) {
   // get actual iteration index
   unsigned long long iter = iterationIndex_.at(timeState);
 
@@ -379,19 +414,36 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     ncells *= nx;
   }
 
-  // create VTK buffer
-  // TODO: need to support either float or double
-  vtkDoubleArray *xyz = vtkDoubleArray::New();
-  xyz->SetNumberOfComponents(1);
-  xyz->SetNumberOfTuples(ncells);
-  double *xyz_ptr = xyz->GetPointer(0);
+  if (rcomp.getDatatype() == openPMD::Datatype::DOUBLE) {
+    // create VTK buffer
+    vtkDoubleArray *xyz_double = vtkDoubleArray::New();
+    xyz_double->SetNumberOfComponents(1);
+    xyz_double->SetNumberOfTuples(ncells);
+    double *xyz_ptr = xyz_double->GetPointer(0);
 
-  // read data from disk into VTK buffer
-  // set offset and extent are set to read the full array
-  rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
-  series_.flush(); // this actually reads the data
+    // set offset and extent are set to read the full array
+    rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
+    series_.flush(); // flush() actually reads the data
+    return xyz_double;
 
-  return xyz;
+  } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
+    // create VTK buffer
+    vtkFloatArray *xyz_float = vtkFloatArray::New();
+    xyz_float->SetNumberOfComponents(1);
+    xyz_float->SetNumberOfTuples(ncells);
+    float *xyz_ptr = xyz_float->GetPointer(0);
+
+    // set offset and extent are set to read the full array
+    rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
+    series_.flush(); // flush() actually reads the data
+    return xyz_float;
+
+  } else {
+    debug5 << "Unknown openPMD Datatype: " << rcomp.getDatatype() << "\n";
+    throw std::exception();
+  }
+
+  return 0;
 }
 
 // ****************************************************************************
