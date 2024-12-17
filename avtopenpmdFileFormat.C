@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -166,7 +167,7 @@ void avtopenpmdFileFormat::ReadFieldMetaData(avtDatabaseMetaData *md,
   for (auto const &mesh_tuple : i.meshes) {
     std::string openpmd_meshname = mesh_tuple.first;
     std::string visit_meshname = openpmd_meshname + "_mesh";
-    
+
     openPMD::Mesh mesh = mesh_tuple.second;
     debug5 << "[openpmd-api-plugin] "
            << "Reading mesh " << openpmd_meshname << "\n";
@@ -313,6 +314,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   std::vector<double> gridSpacing = mesh.gridSpacing<double>();
   std::vector<double> gridOrigin = mesh.gridGlobalOffset();
   std::vector<std::uint64_t> gridExtent = mesh.getExtent();
+  double gridUnitSI = mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
 
   // NOTE: VTK arrays are in Fortran order:
   // "VTK image data arrays are stored such that the X dimension increases
@@ -332,8 +334,10 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
   for (int idim = 0; idim < ndims; ++idim) {
-    origin[idim] = gridOrigin[idim];
-    spacing[idim] = gridSpacing[idim];
+    // rescale code units to SI units
+    origin[idim] = gridUnitSI * gridOrigin[idim];
+    spacing[idim] = gridUnitSI * gridSpacing[idim];
+
     if (cent == AVT_ZONECENT) {
       dims[idim] = static_cast<int>(gridExtent[idim]) + 1;
     } else if (cent == AVT_NODECENT) {
@@ -407,37 +411,49 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
   // open openPMD::ParticleSpecies 'meshname'
   openPMD::ParticleSpecies species = i.particles[meshname];
 
-  // read column-wise particle positions and offsets
+  // read particle positions and particle offsets, and their units
   std::vector<float> x(species.size());
   std::vector<float> y(species.size());
   std::vector<float> z(species.size());
-  std::vector<float> xoff(species.size());
-  std::vector<float> yoff(species.size());
-  std::vector<float> zoff(species.size());
+  double unitSI_x{1};
+  double unitSI_y{1};
+  double unitSI_z{1};
 
-  for (auto [comp, pos, pos_offset] :
-       {std::tuple("x", x, xoff), std::tuple("y", x, yoff),
-        std::tuple("z", x, zoff)}) {
+  std::vector<int> xoff(species.size());
+  std::vector<int> yoff(species.size());
+  std::vector<int> zoff(species.size());
+  double unitSI_xoff{1};
+  double unitSI_yoff{1};
+  double unitSI_zoff{1};
+
+  for (auto [comp, pos, pos_unit, offset, offset_unit] :
+       {std::tuple("x", x, std::ref(unitSI_x), xoff, std::ref(unitSI_xoff)),
+        std::tuple("y", y, std::ref(unitSI_y), yoff, std::ref(unitSI_yoff)),
+        std::tuple("z", z, std::ref(unitSI_z), zoff, std::ref(unitSI_zoff))}) {
     // read positions
     {
-      std::string recordname = "position/" + std::string(comp);
       try {
-        openPMD::Record rc = species[recordname];
+        openPMD::RecordComponent rc = species["position"][comp];
         rc.loadChunkRaw(pos.data(), {0U}, {-1U});
+        pos_unit.get() = rc.getAttribute("unitSI").get<float>();
       } catch (std::out_of_range) {
-        debug5 << "[openpmd-api-plugin] " << recordname << " does not exist!\n";
+        std::string full_recordname = "position/" + std::string(comp);
+        debug5 << "[openpmd-api-plugin] " << full_recordname
+               << " does not exist!\n";
         pos.resize(0);
       }
     }
     // read offsets
     {
-      std::string recordname = "positionOffset/" + std::string(comp);
       try {
-        openPMD::Record rc_offset = species[recordname];
-        rc_offset.loadChunkRaw(pos_offset.data(), {0U}, {-1U});
+        openPMD::RecordComponent rc_offset = species["positionOffset"][comp];
+        rc_offset.loadChunkRaw(offset.data(), {0U}, {-1U});
+        offset_unit.get() = rc_offset.getAttribute("unitSI").get<float>();
       } catch (std::out_of_range) {
-        debug5 << "[openpmd-api-plugin] " << recordname << " does not exist!\n";
-        pos_offset.resize(0);
+        std::string full_recordname = "positionOffset/" + std::string(comp);
+        debug5 << "[openpmd-api-plugin] " << full_recordname
+               << " does not exist!\n";
+        offset.resize(0);
       }
     }
   }
@@ -449,12 +465,14 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
   pts->Delete();
 
   for (int j = 0; j < x.size(); j++) {
-    // TODO(benwibking): positions and positionOffsets may have different units!
-    // need to fix.
-    float this_x = x.at(j) + xoff.at(j);
-    float this_y = y.at(j) + yoff.at(j);
-    float this_z = z.at(j) + zoff.at(j);
-    pts->SetPoint(j, this_x, this_y, this_z);
+    // rescale code units to SI units
+    double xp =
+        unitSI_x * x.at(j) + unitSI_xoff * static_cast<double>(xoff.at(j));
+    double yp =
+        unitSI_y * y.at(j) + unitSI_yoff * static_cast<double>(yoff.at(j));
+    double zp =
+        unitSI_z * z.at(j) + unitSI_zoff * static_cast<double>(zoff.at(j));
+    pts->SetPoint(j, xp, yp, zp);
   }
 
   vtkCellArray *verts = vtkCellArray::New();
@@ -511,6 +529,13 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
   }
 
   return 0;
+}
+
+template <typename T>
+void avtopenpmdFileFormat::ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI) {
+  for (size_t idx = 0; idx < nelem; idx++) {
+    xyz_ptr[idx] *= unitSI;
+  }
 }
 
 // ****************************************************************************
@@ -575,6 +600,9 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     // set offset and extent are set to read the full array
     rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
     series_.flush(); // flush() actually reads the data
+
+    // rescale data to SI units
+    ScaleVarData<double>(xyz_ptr, nelem, rcomp.unitSI());
     return xyz_double;
 
   } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
@@ -587,6 +615,9 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     // set offset and extent are set to read the full array
     rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
     series_.flush(); // flush() actually reads the data
+
+    // rescale data to SI units
+    ScaleVarData<float>(xyz_ptr, nelem, rcomp.unitSI());
     return xyz_float;
 
   } else {

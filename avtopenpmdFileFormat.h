@@ -79,6 +79,8 @@ protected:
   vtkDataSet *GetMeshParticles(openPMD::Iteration i,
                                std::string const &meshname);
 
+  template <typename T> void ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI);
+
   template <typename T> avtCentering GetCenteringType(T const &mesh);
 };
 
