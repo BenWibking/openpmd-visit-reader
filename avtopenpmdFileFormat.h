@@ -58,6 +58,8 @@ public:
   virtual vtkDataArray *GetVar(int, const char *);
   virtual vtkDataArray *GetVectorVar(int, const char *);
 
+  enum class DatasetType { Field = 0, ParticleSpecies };
+
 protected:
   // DATA MEMBERS
   openPMD::Series series_;
@@ -65,10 +67,17 @@ protected:
   std::unordered_map<std::string, std::tuple<std::string, std::string>>
       varMap_; // from VisIt varname, get openPMD mesh name AND record component
                // name
-  std::unordered_map<std::string, std::string>
-      meshMap_; // from VisIt mesh name, get openPMD mesh name
+  std::unordered_map<std::string, std::tuple<DatasetType, std::string>>
+      meshMap_; // from VisIt mesh name, get openPMD mesh name AND DatasetType
 
   virtual void PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
+  void ReadFieldMetaData(avtDatabaseMetaData *md, openPMD::Iteration const &i);
+  void ReadParticleMetaData(avtDatabaseMetaData *md,
+                            openPMD::Iteration const &i);
+
+  vtkDataSet *GetMeshField(openPMD::Iteration i, std::string const &meshname);
+  vtkDataSet *GetMeshParticles(openPMD::Iteration i,
+                               std::string const &meshname);
 
   template <typename T> avtCentering GetCenteringType(T const &mesh);
 };
