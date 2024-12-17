@@ -57,15 +57,18 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   std::string os_pathsep = "/";
   std::string parent_path = p.parent_path();
   std::string opmd_filepath = parent_path + os_pathsep + opmd_filestring;
-  debug5 << "Reading OpenPMD series: " << opmd_filepath << "\n";
+  debug5 << "[openpmd-api-plugin] "
+         << "Reading OpenPMD series: " << opmd_filepath << "\n";
 
   // open openPMD series
   series_ = openPMD::Series(opmd_filepath, openPMD::Access::READ_ONLY);
-  debug5 << "This file uses openPMD-standard version " << series_.openPMD()
+  debug5 << "[openpmd-api-plugin] "
+         << "This file uses openPMD-standard version " << series_.openPMD()
          << '\n';
 
   // read iteration count
-  debug5 << "This file contains " << series_.iterations.size()
+  debug5 << "[openpmd-api-plugin] "
+         << "This file contains " << series_.iterations.size()
          << " iterations:";
   iterationIndex_ = std::vector<unsigned long long>(series_.iterations.size());
 
@@ -112,6 +115,48 @@ int avtopenpmdFileFormat::GetNTimesteps(void) {
 
 void avtopenpmdFileFormat::FreeUpResources(void) {}
 
+template <typename T>
+avtCentering avtopenpmdFileFormat::GetCenteringType(T const &mesh) {
+  // read the element centering
+  std::vector<float> centering;
+  try {
+    centering = mesh.template position<float>();
+  } catch (openPMD::Error) {
+    debug5 << "[openpmd-api-plugin] "
+           << "Can't read centering for mesh!\n";
+    return AVT_UNKNOWN_CENT;
+  }
+
+  // cell-centered == {0.5, 0.5, 0.5}
+  bool isCellCentered = true;
+  for (int idim = 0; idim < centering.size(); idim++) {
+    isCellCentered = (isCellCentered && (centering[idim] == 0.5));
+  }
+
+  // node-centered == {0, 0, 0}
+  bool isNodeCentered = true;
+  for (int idim = 0; idim < centering.size(); idim++) {
+    isNodeCentered = (isNodeCentered && (centering[idim] == 0.));
+  }
+
+  if (isCellCentered) {
+    debug5 << "[openpmd-api-plugin] "
+           << "Mesh is cell-centered.\n";
+    return AVT_ZONECENT;
+  } else if (isNodeCentered) {
+    debug5 << "[openpmd-api-plugin] "
+           << "Mesh is node-centered.\n";
+    return AVT_NODECENT;
+  }
+
+  // face-centered == {0, 0.5, 0.5}, etc.
+  // edge-centered == {0, 0, 0.5}, etc.
+  // However, all other centerings are unsupported by VisIt.
+  debug5 << "[openpmd-api-plugin] "
+         << "Mesh has unsupported centering.\n";
+  return AVT_UNKNOWN_CENT;
+}
+
 // ****************************************************************************
 //  Method: avtopenpmdFileFormat::PopulateDatabaseMetaData
 //
@@ -130,7 +175,8 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
   // NOTE: openPMD's iteration index 'iter' can be an arbitrary number, and can
   // skip numbers. For instance, a dataset can have iterations = {550, 600}.
   unsigned long long iter = iterationIndex_.at(timeState);
-  debug5 << "PopulateDatabaseMetaData() for iteration " << iter << "\n";
+  debug5 << "[openpmd-api-plugin] "
+         << "PopulateDatabaseMetaData() for iteration " << iter << "\n";
 
   // open openPMD::Iteration 'iter'
   openPMD::Iteration i = series_.iterations[iter];
@@ -139,14 +185,16 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
   // https://github.com/openPMD/openPMD-api/blob/dev/examples/6_dump_filebased_series.cpp
 
   // loop over openPMD::Mesh objects
-  debug5 << "Iteration " << iter << " contains " << i.meshes.size()
+  debug5 << "[openpmd-api-plugin] "
+         << "Iteration " << iter << " contains " << i.meshes.size()
          << " meshes:\n";
 
   for (auto const &mesh_tuple : i.meshes) {
     std::string openpmd_meshname = mesh_tuple.first;
     std::string visit_meshname = openpmd_meshname + "_mesh";
     openPMD::Mesh mesh = mesh_tuple.second;
-    debug5 << "Reading mesh " << openpmd_meshname << "\n";
+    debug5 << "[openpmd-api-plugin] "
+           << "Reading mesh " << openpmd_meshname << "\n";
 
     avtMeshType mt = AVT_RECTILINEAR_MESH;
     int nblocks = 1; // <-- this must be 1 for MTSD
@@ -162,40 +210,28 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
     // Each openPMD::Mesh may contain one or more openPMD::MeshRecordComponent
     // A MeshRecordComponent is either i) a scalar, or ii) a vector component
 
-    if (mesh.scalar()) { // this openPMD::Mesh contains only one
-                         // MeshRecordComponent
-      // when there is only one MeshRecordComponent, the name of the variable
-      // should be the same as the Mesh
+    if (mesh.scalar()) {
+      // this openPMD::Mesh contains only one MeshRecordComponent when there is
+      // only one MeshRecordComponent, the name of the variable should be the
+      // same as the Mesh
       std::string varname = openpmd_meshname;
-      debug5 << "Adding scalar variable " << varname << "\n";
 
       // read the element centering
-      std::vector<float> centering = mesh.position<float>();
-      // cell-centered == {0.5, 0.5, 0.5}
-      // node-centered == {0, 0, 0}
-      // staggered == {0, 0.5, 0.5}, etc.
-      // We only support cell-centered for now.
-      bool isCellCentered = true;
-      for (int idim = 0; idim < centering.size(); idim++) {
-        isCellCentered = (isCellCentered && (centering[idim] == 0.5));
-      }
-      if (!isCellCentered) {
-        // skip this var
-        debug5 << "Var " << varname << " is not cell-centered (centering is ";
-        for (int idim = 0; idim < centering.size(); idim++) {
-          debug5 << centering[idim] << ",";
-        }
-        debug5 << "). Skipping...\n";
-        continue;
-      }
+      avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
-      avtCentering cent = AVT_ZONECENT;
-      std::string openpmd_compname = openPMD::MeshRecordComponent::SCALAR;
-      varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
-      AddScalarVarToMetaData(md, varname, visit_meshname, cent);
-
-    } else { // this openPMD::Mesh contains multiple MeshRecordComponent's
-      // NOTE: this object MAY or MAY NOT make sense to treat as a vector.
+      // add var
+      if (cent != AVT_UNKNOWN_CENT) {
+        debug5 << "[openpmd-api-plugin] "
+               << "Adding scalar variable " << varname << "\n";
+        std::string openpmd_compname = openPMD::MeshRecordComponent::SCALAR;
+        varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
+        AddScalarVarToMetaData(md, varname, visit_meshname, cent);
+      } else {
+        debug5 << "[openpmd-api-plugin] "
+               << "Var " << varname
+               << " is not cell/node-centered, skipping.\n";
+      }
+    } else { // this openPMD::Mesh contains multiple 'MeshRecordComponent's
       // It probably makes more sense to enroll multiple scalar variables, one
       // per MeshRecordComponent, and let the user create a vector with
       // expressions, if appropriate for the dataset.
@@ -205,31 +241,22 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
         std::string openpmd_compname = rc.first;
         std::string varname =
             openpmd_meshname + std::string("/") + openpmd_compname;
-        debug5 << "Adding scalar variable " << varname << "\n";
 
         // read the element centering
-        std::vector<float> centering = rc.second.position<float>();
-        // cell-centered == {0.5, 0.5, 0.5}
-        // node-centered == {0, 0, 0}
-        // staggered == {0, 0.5, 0.5}, etc.
-        // We only support cell-centered for now.
-        bool isCellCentered = true;
-        for (int idim = 0; idim < centering.size(); idim++) {
-          isCellCentered = (isCellCentered && (centering[idim] == 0.5));
-        }
-        if (!isCellCentered) {
-          // skip this var
-          debug5 << "Var " << varname << " is not cell-centered (centering is ";
-          for (int idim = 0; idim < centering.size(); idim++) {
-            debug5 << centering[idim] << ",";
-          }
-          debug5 << "). Skipping...\n";
-          continue;
-        }
+        avtCentering cent =
+            GetCenteringType<openPMD::MeshRecordComponent>(rc.second);
 
-        avtCentering cent = AVT_ZONECENT;
-        varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
-        AddScalarVarToMetaData(md, varname, visit_meshname, cent);
+        // add var
+        if (cent != AVT_UNKNOWN_CENT) {
+          debug5 << "[openpmd-api-plugin] "
+                 << "Adding scalar variable " << varname << "\n";
+          varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
+          AddScalarVarToMetaData(md, varname, visit_meshname, cent);
+        } else {
+          debug5 << "[openpmd-api-plugin] "
+                 << "Var " << varname
+                 << " is not cell/node-centered, skipping.\n";
+        }
       }
     }
   }
@@ -263,7 +290,8 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
 
   // get actual meshname
   std::string meshname = meshMap_[visit_meshname];
-  debug5 << "GetMesh() for iteration " << iter << " and mesh " << meshname
+  debug5 << "[openpmd-api-plugin] "
+         << "GetMesh() for iteration " << iter << " and mesh " << meshname
          << "\n";
 
   // open openPMD::Iteration 'iter' and openPMD::Mesh 'meshname'
@@ -272,7 +300,8 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
 
   // check that this is a cartesian mesh
   if (mesh.geometry() != openPMD::Mesh::Geometry::cartesian) {
-    debug5 << "Unknown openPMD::Mesh geometry. Must be cartesian!\n";
+    debug5 << "[openpmd-api-plugin] "
+           << "Unknown openPMD::Mesh geometry. Must be cartesian!\n";
     return 0;
   }
 
@@ -297,11 +326,16 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
   double origin[3] = {0, 0, 0};  // position x0, y0, z0
   double spacing[3] = {0, 0, 0}; // dx, dy, dz
   int dims[3] = {1, 1, 1};       // number of cells + 1
+  avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
   for (int idim = 0; idim < ndims; ++idim) {
     origin[idim] = gridOrigin[idim];
     spacing[idim] = gridSpacing[idim];
-    dims[idim] = static_cast<int>(gridExtent[idim]) + 1;
+    if (cent == AVT_ZONECENT) {
+      dims[idim] = static_cast<int>(gridExtent[idim]) + 1;
+    } else if (cent == AVT_NODECENT) {
+      dims[idim] = static_cast<int>(gridExtent[idim]);
+    }
   }
 
   // debugging output
@@ -319,7 +353,8 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
   for (auto const &val : mesh.getExtent())
     gridExtent_str += std::to_string(val) + ", ";
 
-  debug5 << meshPrefix << ".geometry - " << mesh.geometry() << '\n'
+  debug5 << "[openpmd-api-plugin] " << meshPrefix << ".geometry - "
+         << mesh.geometry() << '\n'
          << meshPrefix << ".dataOrder - " << mesh.dataOrder() << '\n'
          << meshPrefix << ".axisLabels - " << axisLabels << '\n'
          << meshPrefix << ".gridSpacing - " << gridSpacing_str << '\n'
@@ -388,7 +423,8 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
   // lookup openPMD mesh name and record component name from varname
   auto [meshname, rcname] = varMap_[varname];
 
-  debug5 << "GetVar() for iteration " << iter << " and var " << varname
+  debug5 << "[openpmd-api-plugin] "
+         << "GetVar() for iteration " << iter << " and var " << varname
          << std::endl;
 
   // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
@@ -408,17 +444,17 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     std::reverse(gridExtent.begin(), gridExtent.end());
   }
 
-  // get number of cells
-  uint64_t ncells = 1;
+  // get number of elements
+  uint64_t nelem = 1;
   for (auto const &nx : gridExtent) {
-    ncells *= nx;
+    nelem *= nx;
   }
 
   if (rcomp.getDatatype() == openPMD::Datatype::DOUBLE) {
     // create VTK buffer
     vtkDoubleArray *xyz_double = vtkDoubleArray::New();
     xyz_double->SetNumberOfComponents(1);
-    xyz_double->SetNumberOfTuples(ncells);
+    xyz_double->SetNumberOfTuples(nelem);
     double *xyz_ptr = xyz_double->GetPointer(0);
 
     // set offset and extent are set to read the full array
@@ -430,7 +466,7 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     // create VTK buffer
     vtkFloatArray *xyz_float = vtkFloatArray::New();
     xyz_float->SetNumberOfComponents(1);
-    xyz_float->SetNumberOfTuples(ncells);
+    xyz_float->SetNumberOfTuples(nelem);
     float *xyz_ptr = xyz_float->GetPointer(0);
 
     // set offset and extent are set to read the full array
@@ -439,8 +475,9 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     return xyz_float;
 
   } else {
-    debug5 << "Unknown openPMD Datatype: " << rcomp.getDatatype() << "\n";
-    throw std::exception();
+    debug5 << "[openpmd-api-plugin] "
+           << "Unknown openPMD Datatype: " << rcomp.getDatatype() << "\n";
+    return 0;
   }
 
   return 0;

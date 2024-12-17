@@ -69,6 +69,8 @@ protected:
       meshMap_; // from VisIt mesh name, get openPMD mesh name
 
   virtual void PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
+
+  template <typename T> avtCentering GetCenteringType(T const &mesh);
 };
 
 #endif
