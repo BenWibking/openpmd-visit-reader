@@ -142,9 +142,10 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
          << " meshes:\n";
 
   for (auto const &mesh_tuple : i.meshes) {
-    std::string meshname = mesh_tuple.first;
+    std::string openpmd_meshname = mesh_tuple.first;
+    std::string visit_meshname = openpmd_meshname + "_mesh";
     openPMD::Mesh mesh = mesh_tuple.second;
-    debug5 << "Reading mesh " << meshname << "\n";
+    debug5 << "Reading mesh " << openpmd_meshname << "\n";
 
     avtMeshType mt = AVT_RECTILINEAR_MESH;
     int nblocks = 1; // <-- this must be 1 for MTSD
@@ -153,7 +154,8 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
     int topological_dimension = spatial_dimension;
     double *extents = NULL;
 
-    AddMeshToMetaData(md, meshname, mt, extents, nblocks, block_origin,
+    meshMap_[visit_meshname] = openpmd_meshname;
+    AddMeshToMetaData(md, visit_meshname, mt, extents, nblocks, block_origin,
                       spatial_dimension, topological_dimension);
 
     // Each openPMD::Mesh may contain one or more openPMD::MeshRecordComponent
@@ -163,15 +165,17 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
                          // MeshRecordComponent
       // when there is only one MeshRecordComponent, the name of the variable
       // should be the same as the Mesh
-      debug5 << "Adding scalar variable " << meshname << "\n";
+      std::string varname = openpmd_meshname;
+      debug5 << "Adding scalar variable " << varname << "\n";
 
       // TODO: read the centering from attributes
       // NOTE: OpenPMD allows for arbitrary centering. Components can be face-
       // or edge-centered! VisIt centerings: AVT_NODECENT, AVT_ZONECENT,
       // AVT_UNKNOWN_CENT
       avtCentering cent = AVT_ZONECENT;
-
-      AddScalarVarToMetaData(md, meshname, meshname, cent);
+      std::string openpmd_compname = openPMD::MeshRecordComponent::SCALAR;
+      varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
+      AddScalarVarToMetaData(md, varname, visit_meshname, cent);
 
     } else { // this openPMD::Mesh contains multiple MeshRecordComponent's
       // NOTE: this object MAY or MAY NOT make sense to treat as a vector.
@@ -181,7 +185,8 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
 
       for (auto const &rc : mesh) {
         // when there are multiple components, we create a hierarchical dataset
-        std::string varname = meshname + std::string("/") + rc.first;
+        std::string openpmd_compname = rc.first;
+        std::string varname = openpmd_meshname + std::string("/") + openpmd_compname;
         debug5 << "Adding scalar variable " << varname << "\n";
 
         // TODO: read the centering from attributes
@@ -189,8 +194,8 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
         // or edge-centered! VisIt centerings: AVT_NODECENT, AVT_ZONECENT,
         // AVT_UNKNOWN_CENT
         avtCentering cent = AVT_ZONECENT;
-
-        AddScalarVarToMetaData(md, varname, meshname, cent);
+        varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
+        AddScalarVarToMetaData(md, varname, visit_meshname, cent);
       }
     }
   }
@@ -217,13 +222,16 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
 //
 // ****************************************************************************
 
-vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
+vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *visit_meshname) {
   // get actual iteration index
   unsigned long long iter = iterationIndex_.at(timeState);
+
+  // get actual meshname
+  std::string meshname = meshMap_[visit_meshname];
   debug5 << "GetMesh() for iteration " << iter << " and mesh " << meshname
          << "\n";
 
-  // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
+  // open openPMD::Iteration 'iter' and openPMD::Mesh 'meshname'
   openPMD::Iteration i = series_.iterations[iter];
   openPMD::Mesh mesh = i.meshes[meshname];
 
@@ -341,15 +349,12 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, const char *meshname) {
 vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
   // get actual iteration index
   unsigned long long iter = iterationIndex_.at(timeState);
+
+  // lookup openPMD mesh name and record component name from varname
+  auto [meshname, rcname] = varMap_[varname];
+
   debug5 << "GetVar() for iteration " << iter << " and var " << varname
          << std::endl;
-
-  // lookup mesh name and record component name from varname
-  // TODO: implement this
-  std::string meshname = varname;
-  const char *rcname =
-      openPMD::Mesh::MeshRecordComponent::SCALAR; // FIXME: assumes a scalar
-                                                  // mesh
 
   // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
   openPMD::Iteration i = series_.iterations[iter];

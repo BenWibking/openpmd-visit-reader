@@ -9,10 +9,12 @@
 #ifndef AVT_openpmd_FILE_FORMAT_H
 #define AVT_openpmd_FILE_FORMAT_H
 
+#include <string>
+#include <unordered_map>
+
 #include <openPMD/openPMD.hpp>
 
 #include <avtMTSDFileFormat.h>
-
 
 // ****************************************************************************
 //  Class: avtopenpmdFileFormat
@@ -25,46 +27,48 @@
 //
 // ****************************************************************************
 
-class avtopenpmdFileFormat : public avtMTSDFileFormat
-{
-  public:
-                       avtopenpmdFileFormat(const char *);
-    virtual           ~avtopenpmdFileFormat() {;}
+class avtopenpmdFileFormat : public avtMTSDFileFormat {
+public:
+  avtopenpmdFileFormat(const char *);
+  virtual ~avtopenpmdFileFormat() { ; }
 
-    //
-    // This is used to return unconvention data -- ranging from material
-    // information to information about block connectivity.
-    //
-    // virtual void      *GetAuxiliaryData(const char *var, int timestep, 
-    //                                     const char *type, void *args, 
-    //                                     DestructorFunction &);
-    //
+  //
+  // This is used to return unconvention data -- ranging from material
+  // information to information about block connectivity.
+  //
+  // virtual void      *GetAuxiliaryData(const char *var, int timestep,
+  //                                     const char *type, void *args,
+  //                                     DestructorFunction &);
+  //
 
-    //
-    // If you know the times and cycle numbers, overload this function.
-    // Otherwise, VisIt will make up some reasonable ones for you.
-    //
-    // virtual void        GetCycles(std::vector<int> &);
-    // virtual void        GetTimes(std::vector<double> &);
-    //
+  //
+  // If you know the times and cycle numbers, overload this function.
+  // Otherwise, VisIt will make up some reasonable ones for you.
+  //
+  // virtual void        GetCycles(std::vector<int> &);
+  // virtual void        GetTimes(std::vector<double> &);
+  //
 
-    virtual int            GetNTimesteps(void);
+  virtual int GetNTimesteps(void);
 
-    virtual const char    *GetType(void)   { return "openpmd"; }
-    virtual void           FreeUpResources(void); 
+  virtual const char *GetType(void) { return "openpmd"; }
+  virtual void FreeUpResources(void);
 
-    virtual vtkDataSet    *GetMesh(int, const char *);
-    virtual vtkDataArray  *GetVar(int, const char *);
-    virtual vtkDataArray  *GetVectorVar(int, const char *);
+  virtual vtkDataSet *GetMesh(int, const char *);
+  virtual vtkDataArray *GetVar(int, const char *);
+  virtual vtkDataArray *GetVectorVar(int, const char *);
 
-  protected:
-    // DATA MEMBERS
-    openPMD::Series series_;
-    std::vector<unsigned long long> iterationIndex_;
+protected:
+  // DATA MEMBERS
+  openPMD::Series series_;
+  std::vector<unsigned long long> iterationIndex_;
+  std::unordered_map<std::string, std::tuple<std::string, std::string>>
+      varMap_; // from VisIt varname, get openPMD mesh name AND record component
+               // name
+  std::unordered_map<std::string, std::string>
+      meshMap_; // from VisIt mesh name, get openPMD mesh name
 
-    virtual void           PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
-
+  virtual void PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
 };
-
 
 #endif
