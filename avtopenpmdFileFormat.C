@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
@@ -314,7 +315,8 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   std::vector<double> gridSpacing = mesh.gridSpacing<double>();
   std::vector<double> gridOrigin = mesh.gridGlobalOffset();
   std::vector<std::uint64_t> gridExtent = mesh.getExtent();
-  double gridUnitSI = mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
+  double gridUnitSI =
+      mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
 
   // NOTE: VTK arrays are in Fortran order:
   // "VTK image data arrays are stored such that the X dimension increases
@@ -412,66 +414,118 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
   openPMD::ParticleSpecies species = i.particles[meshname];
 
   // read particle positions and particle offsets, and their units
-  std::vector<float> x(species.size());
-  std::vector<float> y(species.size());
-  std::vector<float> z(species.size());
+  // TODO: particle position/offsets can by any of: float, double, int, uint,
+  // int64, or uint64! (offsets are more likely to be integer types)
+  std::vector<double> x;
+  std::vector<double> y;
+  std::vector<double> z;
   double unitSI_x{1};
   double unitSI_y{1};
   double unitSI_z{1};
 
-  std::vector<int> xoff(species.size());
-  std::vector<int> yoff(species.size());
-  std::vector<int> zoff(species.size());
+  std::vector<double> xoff;
+  std::vector<double> yoff;
+  std::vector<double> zoff;
   double unitSI_xoff{1};
   double unitSI_yoff{1};
   double unitSI_zoff{1};
 
   for (auto [comp, pos, pos_unit, offset, offset_unit] :
-       {std::tuple("x", x, std::ref(unitSI_x), xoff, std::ref(unitSI_xoff)),
-        std::tuple("y", y, std::ref(unitSI_y), yoff, std::ref(unitSI_yoff)),
-        std::tuple("z", z, std::ref(unitSI_z), zoff, std::ref(unitSI_zoff))}) {
-    // read positions
+       {std::tuple("x", std::ref(x), std::ref(unitSI_x), std::ref(xoff),
+                   std::ref(unitSI_xoff)),
+        std::tuple("y", std::ref(y), std::ref(unitSI_y), std::ref(yoff),
+                   std::ref(unitSI_yoff)),
+        std::tuple("z", std::ref(z), std::ref(unitSI_z), std::ref(zoff),
+                   std::ref(unitSI_zoff))}) {
+    // queue read positions
     {
+      std::string full_recordname = "position/" + std::string(comp);
       try {
         openPMD::RecordComponent rc = species["position"][comp];
-        rc.loadChunkRaw(pos.data(), {0U}, {-1U});
-        pos_unit.get() = rc.getAttribute("unitSI").get<float>();
+        std::vector<uint64_t> extent = rc.getExtent();
+        assert(extent.size() == 1);
+        pos.get().resize(extent[0]);
+        rc.loadChunkRaw(pos.get().data(), {0U}, {-1U});
+        pos_unit.get() = rc.unitSI();
+        debug5 << "Read " << full_recordname << " successfully with extent "
+               << extent[0] << ".\n";
       } catch (std::out_of_range) {
-        std::string full_recordname = "position/" + std::string(comp);
         debug5 << "[openpmd-api-plugin] " << full_recordname
                << " does not exist!\n";
-        pos.resize(0);
       }
     }
-    // read offsets
+    // queue read offsets
     {
+      std::string full_recordname = "positionOffset/" + std::string(comp);
       try {
         openPMD::RecordComponent rc_offset = species["positionOffset"][comp];
-        rc_offset.loadChunkRaw(offset.data(), {0U}, {-1U});
-        offset_unit.get() = rc_offset.getAttribute("unitSI").get<float>();
+        std::vector<uint64_t> extent = rc_offset.getExtent();
+        assert(extent.size() == 1);
+        offset.get().resize(extent[0]);
+        rc_offset.loadChunkRaw(offset.get().data(), {0U}, {-1U});
+        offset_unit.get() = rc_offset.unitSI();
+        debug5 << "Read " << full_recordname << " successfully with extent "
+               << extent[0] << ".\n";
       } catch (std::out_of_range) {
-        std::string full_recordname = "positionOffset/" + std::string(comp);
         debug5 << "[openpmd-api-plugin] " << full_recordname
                << " does not exist!\n";
-        offset.resize(0);
       }
     }
   }
 
+  series_.flush(); // flush() actually reads the data
+
+  // output units for debugging
+  debug5 << "unitSI_x = " << unitSI_x << '\n';
+  debug5 << "unitSI_y = " << unitSI_y << '\n';
+  debug5 << "unitSI_z = " << unitSI_z << '\n';
+  debug5 << "unitSI_xoff = " << unitSI_xoff << '\n';
+  debug5 << "unitSI_yoff = " << unitSI_yoff << '\n';
+  debug5 << "unitSI_zoff = " << unitSI_zoff << '\n';
+
+  // check that data is sane
+  auto all_equal = [](auto v1, auto v2, auto v3) constexpr -> bool {
+    return (v1 == v2) && (v2 == v3);
+  };
+
+  if (!all_equal(x.size(), y.size(), z.size())) {
+    debug5 << "[openpmd-api-plugin] x.size() == " << x.size() << '\n';
+    debug5 << "[openpmd-api-plugin] y.size() == " << y.size() << '\n';
+    debug5 << "[openpmd-api-plugin] z.size() == " << z.size() << '\n';
+    debug5 << "[openpmd-api-plugin] Particle position data is not consistent! "
+              "Can't read it.\n";
+    return 0;
+  }
+
+  if (!all_equal(xoff.size(), yoff.size(), zoff.size())) {
+    debug5 << "[openpmd-api-plugin] xoff.size() == " << xoff.size() << '\n';
+    debug5 << "[openpmd-api-plugin] yoff.size() == " << yoff.size() << '\n';
+    debug5 << "[openpmd-api-plugin] zoff.size() == " << zoff.size() << '\n';
+    debug5 << "[openpmd-api-plugin] Particle positionOffset data is not "
+              "consistent! Can't read it.\n";
+    return 0;
+  }
+
+  if (x.size() != xoff.size()) {
+    debug5 << "[openpmd-api-plugin] Particles have size " << x.size()
+           << "but offsets have size " << xoff.size()
+           << ". Can't read particles!\n";
+    return 0;
+  }
+
   vtkPolyData *pd = vtkPolyData::New();
   vtkPoints *pts = vtkPoints::New();
+  debug5 << "Creating vtkPoints of size = " << x.size() << '\n';
   pts->SetNumberOfPoints(x.size());
   pd->SetPoints(pts);
   pts->Delete();
 
   for (int j = 0; j < x.size(); j++) {
     // rescale code units to SI units
-    double xp =
-        unitSI_x * x.at(j) + unitSI_xoff * static_cast<double>(xoff.at(j));
-    double yp =
-        unitSI_y * y.at(j) + unitSI_yoff * static_cast<double>(yoff.at(j));
-    double zp =
-        unitSI_z * z.at(j) + unitSI_zoff * static_cast<double>(zoff.at(j));
+    // dimensions could be extremely small or large, so compute double
+    double xp = unitSI_x * x.at(j) + unitSI_xoff * xoff.at(j);
+    double yp = unitSI_y * y.at(j) + unitSI_yoff * yoff.at(j);
+    double zp = unitSI_z * z.at(j) + unitSI_zoff * zoff.at(j);
     pts->SetPoint(j, xp, yp, zp);
   }
 
