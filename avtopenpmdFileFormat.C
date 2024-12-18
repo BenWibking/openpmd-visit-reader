@@ -157,10 +157,9 @@ avtCentering avtopenpmdFileFormat::GetCenteringType(T const &mesh) {
 }
 
 bool avtopenpmdFileFormat::MeshNeedsTranspose(openPMD::Mesh const &mesh) {
-  // VTK meshes are in order FortranArray[x,y,z].
-  // openPMD supports labeling nD arrays."""
-  // the openPMD v1.0.*/1.1.* attribute dataOrder describes if metadata is to be
-  // inverted
+  // VTK meshes are equivalent to **C-contiguous numpy arrays, indexed as
+  // [z,y,x]**. (The openPMD v1.0.*/1.1.* attribute dataOrder describes if
+  // metadata is to be inverted.)
   bool meta_data_in_C = (mesh.dataOrder() == openPMD::Mesh::DataOrder::C);
   int last_idx = mesh.axisLabels().size() - 1;
   std::string first_axis_label =
@@ -175,10 +174,10 @@ bool avtopenpmdFileFormat::MeshNeedsTranspose(openPMD::Mesh const &mesh) {
 
   // common for 1D and 2D data in openPMD from accelerator physics: axes labeled
   // as x-z and only z
-  if (first_axis_label == "x" && last_axis_label == "z") {
-    return true;
+  if (first_axis_label == "z" && last_axis_label == "x") {
+    return false; // the data is ordered as expected by VTK (see comment)
   } else {
-    return false;
+    return true; // the data is NOT ordered as expected by VTK
   }
 }
 
@@ -481,14 +480,15 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
   double unitSI_yoff{1};
   double unitSI_zoff{1};
 
-  for (auto [comp, pos, pos_unit, offset, offset_unit] :
-       {std::tuple("x", std::ref(x), std::ref(unitSI_x), std::ref(xoff),
-                   std::ref(unitSI_xoff)),
-        std::tuple("y", std::ref(y), std::ref(unitSI_y), std::ref(yoff),
-                   std::ref(unitSI_yoff)),
-        std::tuple("z", std::ref(z), std::ref(unitSI_z), std::ref(zoff),
-                   std::ref(unitSI_zoff))}) {
-    // queue read positions
+  auto array_iter = {std::tuple("x", std::ref(x), std::ref(unitSI_x),
+                                std::ref(xoff), std::ref(unitSI_xoff)),
+                     std::tuple("y", std::ref(y), std::ref(unitSI_y),
+                                std::ref(yoff), std::ref(unitSI_yoff)),
+                     std::tuple("z", std::ref(z), std::ref(unitSI_z),
+                                std::ref(zoff), std::ref(unitSI_zoff))};
+
+  for (auto [comp, pos, pos_unit, offset, offset_unit] : array_iter) {
+    // queue reading positions
     {
       std::string full_recordname = "position/" + std::string(comp);
       try {
@@ -497,15 +497,14 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
         assert(extent.size() == 1);
         pos.get().resize(extent[0]);
         rc.loadChunkRaw(pos.get().data(), {0U}, {-1U});
-        pos_unit.get() = rc.unitSI();
-        debug5 << "Read " << full_recordname << " successfully with extent "
-               << extent[0] << ".\n";
+        debug5 << "Reading " << full_recordname << " with extent " << extent[0]
+               << ".\n";
       } catch (std::out_of_range) {
         debug5 << "[openpmd-api-plugin] " << full_recordname
                << " does not exist!\n";
       }
     }
-    // queue read offsets
+    // queue reading offsets
     {
       std::string full_recordname = "positionOffset/" + std::string(comp);
       try {
@@ -514,9 +513,8 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
         assert(extent.size() == 1);
         offset.get().resize(extent[0]);
         rc_offset.loadChunkRaw(offset.get().data(), {0U}, {-1U});
-        offset_unit.get() = rc_offset.unitSI();
-        debug5 << "Read " << full_recordname << " successfully with extent "
-               << extent[0] << ".\n";
+        debug5 << "Reading " << full_recordname << " with extent " << extent[0]
+               << ".\n";
       } catch (std::out_of_range) {
         debug5 << "[openpmd-api-plugin] " << full_recordname
                << " does not exist!\n";
@@ -524,15 +522,22 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
     }
   }
 
-  series_.flush(); // flush() actually reads the data
+  series_.flush(); // flush() actually reads the data (and unitSI!)
 
-  // output units for debugging
-  debug5 << "unitSI_x = " << unitSI_x << '\n';
-  debug5 << "unitSI_y = " << unitSI_y << '\n';
-  debug5 << "unitSI_z = " << unitSI_z << '\n';
-  debug5 << "unitSI_xoff = " << unitSI_xoff << '\n';
-  debug5 << "unitSI_yoff = " << unitSI_yoff << '\n';
-  debug5 << "unitSI_zoff = " << unitSI_zoff << '\n';
+  for (auto [comp, pos, pos_unit, offset, offset_unit] : array_iter) {
+    // read positions unitSI
+    {
+      openPMD::RecordComponent rc = species["position"][comp];
+      pos_unit.get() = rc.unitSI();
+      debug5 << "unitSI_" << comp << " = " << pos_unit.get() << '\n';
+    }
+    // read offsets unitSI
+    {
+      openPMD::RecordComponent rc_offset = species["positionOffset"][comp];
+      offset_unit.get() = rc_offset.unitSI();
+      debug5 << "unitSI_" << comp << "off = " << offset_unit.get() << '\n';
+    }
+  }
 
   // check that data is sane
   auto all_equal = [](auto v1, auto v2, auto v3) constexpr -> bool {
@@ -662,22 +667,23 @@ void avtopenpmdFileFormat::TransposeArray(T *xyz_ptr,
 
   // compute transpose coefficients E, F, G
   // (these depend on the transposition)
-  // 3d transposition (might be correct...)
+
+  // TODO(benwibking): add 3d transposition
+#if 0
+  const size_t E = 1;
+  const size_t F = nx[1];
+  const size_t G = nx[1] * nx[2];
+#endif
+
+  // 2d transposition
   const size_t E = 1;
   const size_t F = nx[1];
   const size_t G = nx[1] * nx[2];
 
-#if 0
-  // 2d transposition
-  const size_t E = 1;
-  const size_t F = nx[2];
-  const size_t G = nx[2] * nx[0];
-#endif
-
   // now do the transpose on the original array
-  for (int i = 0; i < nx[0]; ++i) {
+  for (int k = 0; k < nx[0]; ++k) {
     for (int j = 0; j < nx[1]; ++j) {
-      for (int k = 0; k < nx[2]; ++k) {
+      for (int i = 0; i < nx[2]; ++i) {
         const size_t fromIndex = i * A + j * B + k * C;
         const size_t toIndex = i * E + j * F + k * G;
         xyz_ptr[toIndex] = in_arr[fromIndex];
@@ -742,14 +748,11 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
   std::vector<std::uint64_t> in_gridExtent = rcomp.getExtent();
   assert(in_gridExtent.size() == ndims);
 
-  std::vector<std::uint64_t> gridExtent;
-  if (ndims == 3) {
-    gridExtent = TransposeVector(in_gridExtent, _3d, 1ULL);
-  } else if (ndims == 2) {
-    gridExtent = TransposeVector(in_gridExtent, _2d, 1ULL);
-  } else {
-    gridExtent = TransposeVector(in_gridExtent, _1d, 1ULL);
-  }
+  // create a length-3 vector (with 1-padding)
+  // NOTE: this vector should NOT be transposed. It must represent the in-memory
+  // array extents *prior* to transposition.
+  std::vector<std::uint64_t> gridExtent =
+      TransposeVector(in_gridExtent, _identity, 1ULL);
 
   // get number of elements
   uint64_t nelem = 1;
@@ -768,7 +771,7 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
     series_.flush(); // flush() actually reads the data
 
-    // rescale data to SI units
+    // rescale data to SI units (rcomp.unitSI() can only be read *after* flush!)
     ScaleVarData<double>(xyz_ptr, nelem, rcomp.unitSI());
 
     // transpose array if needed
@@ -794,7 +797,7 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
     series_.flush(); // flush() actually reads the data
 
-    // rescale data to SI units
+    // rescale data to SI units (rcomp.unitSI() can only be read *after* flush!)
     ScaleVarData<float>(xyz_ptr, nelem, rcomp.unitSI());
 
     // transpose array if needed
