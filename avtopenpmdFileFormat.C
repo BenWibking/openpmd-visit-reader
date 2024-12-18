@@ -156,6 +156,32 @@ avtCentering avtopenpmdFileFormat::GetCenteringType(T const &mesh) {
   return AVT_UNKNOWN_CENT;
 }
 
+bool avtopenpmdFileFormat::MeshNeedsTranspose(openPMD::Mesh const &mesh) {
+  // VTK meshes are in order FortranArray[x,y,z].
+  // openPMD supports labeling nD arrays."""
+  // the openPMD v1.0.*/1.1.* attribute dataOrder describes if metadata is to be
+  // inverted
+  bool meta_data_in_C = (mesh.dataOrder() == openPMD::Mesh::DataOrder::C);
+  int last_idx = mesh.axisLabels().size() - 1;
+  std::string first_axis_label =
+      meta_data_in_C ? mesh.axisLabels()[0] : mesh.axisLabels()[last_idx];
+  std::string last_axis_label =
+      meta_data_in_C ? mesh.axisLabels()[last_idx] : mesh.axisLabels()[0];
+
+  debug5 << "MeshNeedsTranspose(): first_axis_label = " << first_axis_label
+         << '\n';
+  debug5 << "MeshNeedsTranspose(): last_axis_label = " << last_axis_label
+         << '\n';
+
+  // common for 1D and 2D data in openPMD from accelerator physics: axes labeled
+  // as x-z and only z
+  if (first_axis_label == "x" && last_axis_label == "z") {
+    return true;
+  } else {
+    return false;
+  }
+}
+
 void avtopenpmdFileFormat::ReadFieldMetaData(avtDatabaseMetaData *md,
                                              openPMD::Iteration const &i) {
   // NOTE: a good reference for understanding how to read OpenPMD files is:
@@ -176,8 +202,8 @@ void avtopenpmdFileFormat::ReadFieldMetaData(avtDatabaseMetaData *md,
     avtMeshType mt = AVT_RECTILINEAR_MESH;
     int nblocks = 1; // <-- this must be 1 for MTSD
     int block_origin = 0;
-    int spatial_dimension = mesh.axisLabels().size();
-    int topological_dimension = spatial_dimension;
+    int spatial_dimension = 3; // mesh.axisLabels().size();
+    int topological_dimension = mesh.axisLabels().size();
     double *extents = NULL;
 
     meshMap_[visit_meshname] = std::tuple(DatasetType::Field, openpmd_meshname);
@@ -312,22 +338,47 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
 
   // openPMD geometry
   const int ndims = mesh.axisLabels().size();
-  std::vector<double> gridSpacing = mesh.gridSpacing<double>();
-  std::vector<double> gridOrigin = mesh.gridGlobalOffset();
-  std::vector<std::uint64_t> gridExtent = mesh.getExtent();
+  std::vector<double> in_gridSpacing = mesh.gridSpacing<double>();
+  std::vector<double> in_gridOrigin = mesh.gridGlobalOffset();
+  std::vector<std::uint64_t> in_gridExtent = mesh.getExtent();
+
+  std::vector<double> gridSpacing;
+  std::vector<double> gridOrigin;
+  std::vector<std::uint64_t> gridExtent;
+
   double gridUnitSI =
       mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
 
-  // NOTE: VTK arrays are in Fortran order:
-  // "VTK image data arrays are stored such that the X dimension increases
-  // fastest, followed by Y, followed by Z."
-  // (https://public.kitware.com/pipermail/vtkusers/2016-September/096626.html)
-  // Instead of re-ordering the array, we just flip the axisLabels as needed.
-  if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
-    std::reverse(gridSpacing.begin(), gridSpacing.end());
-    std::reverse(gridOrigin.begin(), gridOrigin.end());
-    std::reverse(gridExtent.begin(), gridExtent.end());
+  // https://gitlab.kitware.com/paraview/paraview/-/blob/master/Wrapping/Python/paraview/algorithms/openpmd.py#L704
+  if (MeshNeedsTranspose(mesh)) {
+    if (ndims == 3) {
+      gridExtent = TransposeVector(in_gridExtent, _3d, 1ULL);
+      gridSpacing = TransposeVector(in_gridSpacing, _3d, 0.);
+      gridOrigin = TransposeVector(in_gridOrigin, _3d, 0.);
+    } else if (ndims == 2) {
+      gridExtent = TransposeVector(in_gridExtent, _2d, 1ULL);
+      gridSpacing = TransposeVector(in_gridSpacing, _2d, 0.);
+      gridOrigin = TransposeVector(in_gridOrigin, _2d, 0.);
+    } else {
+      gridExtent = TransposeVector(in_gridExtent, _1d, 1ULL);
+      gridSpacing = TransposeVector(in_gridSpacing, _1d, 0.);
+      gridOrigin = TransposeVector(in_gridOrigin, _1d, 0.);
+    }
+  } else {
+    gridExtent = TransposeVector(in_gridExtent, _identity, 1ULL);
+    gridSpacing = TransposeVector(in_gridSpacing, _identity, 0.);
+    gridOrigin = TransposeVector(in_gridOrigin, _identity, 0.);
   }
+
+  // debugging
+  debug5 << "gridExtent.size() = " << gridExtent.size() << '\n';
+
+  for (int idim = 0; idim < 3; ++idim) {
+    debug5 << "gridExtent[" << idim << "] = " << gridExtent[idim] << '\n';
+    debug5 << "gridSpacing[" << idim << "] = " << gridSpacing[idim] << '\n';
+    debug5 << "gridOrigin[" << idim << "] = " << gridOrigin[idim] << '\n';
+  }
+  debug5 << '\n';
 
   // VTK geometry
   double origin[3] = {0, 0, 0};  // position x0, y0, z0
@@ -335,7 +386,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   int dims[3] = {1, 1, 1};       // number of cells + 1
   avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
-  for (int idim = 0; idim < ndims; ++idim) {
+  for (int idim = 0; idim < 3; ++idim) {
     // rescale code units to SI units
     origin[idim] = gridUnitSI * gridOrigin[idim];
     spacing[idim] = gridUnitSI * gridSpacing[idim];
@@ -385,7 +436,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   }
 
   // loop over real dimensions
-  for (int idim = 0; idim < ndims; ++idim) {
+  for (int idim = 0; idim < 3; ++idim) {
     coords[idim]->SetNumberOfTuples(dims[idim]);
     float *array = static_cast<float *>(coords[idim]->GetVoidPointer(0));
     // set rectilinear coordinates at nodes of grid
@@ -592,6 +643,66 @@ void avtopenpmdFileFormat::ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI) {
   }
 }
 
+template <typename T>
+void avtopenpmdFileFormat::TransposeArray(T *xyz_ptr,
+                                          std::vector<int> const &transposition,
+                                          std::vector<uint64_t> const &nx) {
+  // https://gitlab.kitware.com/paraview/paraview/-/blob/master/Wrapping/Python/paraview/algorithms/openpmd.py#L423
+  // transpose array axes (in the same way as numpy.transpose)
+
+  const size_t len = nx[0] * nx[1] * nx[2];
+  std::vector<T> in_arr(len);
+  std::memcpy(in_arr.data(), xyz_ptr, len);
+
+  // compute the transpose coefficients A, B, C
+  // (these are fixed)
+  const size_t A = nx[2] * nx[1];
+  const size_t B = nx[2];
+  const size_t C = 1;
+
+  // compute transpose coefficients E, F, G
+  // (these depend on the transposition)
+  // 3d transposition (might be correct...)
+  const size_t E = 1;
+  const size_t F = nx[1];
+  const size_t G = nx[1] * nx[2];
+
+#if 0
+  // 2d transposition
+  const size_t E = 1;
+  const size_t F = nx[2];
+  const size_t G = nx[2] * nx[0];
+#endif
+
+  // now do the transpose on the original array
+  for (int i = 0; i < nx[0]; ++i) {
+    for (int j = 0; j < nx[1]; ++j) {
+      for (int k = 0; k < nx[2]; ++k) {
+        const size_t fromIndex = i * A + j * B + k * C;
+        const size_t toIndex = i * E + j * F + k * G;
+        xyz_ptr[toIndex] = in_arr[fromIndex];
+      }
+    }
+  }
+}
+
+template <typename T>
+std::vector<T>
+avtopenpmdFileFormat::TransposeVector(std::vector<T> const &in_vec,
+                                      const std::vector<int> &transpose,
+                                      const T fill_value) {
+  std::vector<T> vec = {fill_value, fill_value, fill_value};
+  for (int i = 0; i < in_vec.size(); ++i) {
+    vec[i] = in_vec[i];
+  }
+
+  std::vector<T> new_vec(3);
+  for (int i = 0; i < 3; ++i) {
+    new_vec[i] = vec[transpose[i]];
+  }
+  return std::move(new_vec);
+}
+
 // ****************************************************************************
 //  Method: avtopenpmdFileFormat::GetVar
 //
@@ -627,15 +738,17 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
   openPMD::MeshRecordComponent rcomp = mesh[rcname];
 
   // get geometry
-  std::vector<std::uint64_t> gridExtent = rcomp.getExtent();
+  const int ndims = mesh.axisLabels().size();
+  std::vector<std::uint64_t> in_gridExtent = rcomp.getExtent();
+  assert(in_gridExtent.size() == ndims);
 
-  // NOTE: VTK arrays are in Fortran order:
-  // "VTK image data arrays are stored such that the X dimension increases
-  // fastest, followed by Y, followed by Z."
-  // (https://public.kitware.com/pipermail/vtkusers/2016-September/096626.html)
-  // Instead of re-ordering the array, we just flip the axisLabels as needed.
-  if (mesh.dataOrder() == openPMD::Mesh::DataOrder::C) {
-    std::reverse(gridExtent.begin(), gridExtent.end());
+  std::vector<std::uint64_t> gridExtent;
+  if (ndims == 3) {
+    gridExtent = TransposeVector(in_gridExtent, _3d, 1ULL);
+  } else if (ndims == 2) {
+    gridExtent = TransposeVector(in_gridExtent, _2d, 1ULL);
+  } else {
+    gridExtent = TransposeVector(in_gridExtent, _1d, 1ULL);
   }
 
   // get number of elements
@@ -657,6 +770,17 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
 
     // rescale data to SI units
     ScaleVarData<double>(xyz_ptr, nelem, rcomp.unitSI());
+
+    // transpose array if needed
+    if (MeshNeedsTranspose(mesh)) {
+      debug5 << "[openpmd-api-plugin] Transposing array for var " << varname
+             << '\n';
+      if (ndims == 3) {
+        TransposeArray(xyz_ptr, _3d, gridExtent);
+      } else if (ndims == 2) {
+        TransposeArray(xyz_ptr, _2d, gridExtent);
+      }
+    }
     return xyz_double;
 
   } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
@@ -672,6 +796,17 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
 
     // rescale data to SI units
     ScaleVarData<float>(xyz_ptr, nelem, rcomp.unitSI());
+
+    // transpose array if needed
+    if (MeshNeedsTranspose(mesh)) {
+      debug5 << "[openpmd-api-plugin] Transposing array for var " << varname
+             << '\n';
+      if (ndims == 3) {
+        TransposeArray(xyz_ptr, _3d, gridExtent);
+      } else if (ndims == 2) {
+        TransposeArray(xyz_ptr, _2d, gridExtent);
+      }
+    }
     return xyz_float;
 
   } else {

@@ -60,6 +60,16 @@ public:
 
   enum class DatasetType { Field = 0, ParticleSpecies };
 
+  // Order of transposes relative to the layout of data
+  // For 3D data : in case of (z, y, x) ordering of axes
+  const std::vector<int> _3d = {2, 1, 0};
+  // For 2D data : in case of (z, x) ordering of axes
+  const std::vector<int> _2d = {1, 2, 0};
+  // For 1D data : in case data layout (z)
+  const std::vector<int> _1d = {2, 1, 0};
+  // identity transpose
+  const std::vector<int> _identity = {0, 1, 2};
+
 protected:
   // DATA MEMBERS
   openPMD::Series series_;
@@ -82,6 +92,17 @@ protected:
   template <typename T> void ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI);
 
   template <typename T> avtCentering GetCenteringType(T const &mesh);
+
+  bool MeshNeedsTranspose(openPMD::Mesh const &mesh);
+
+  template <typename T>
+  std::vector<T> TransposeVector(std::vector<T> const &vec,
+                                 std::vector<int> const &transpose,
+                                 T fill_value);
+
+  template <typename T>
+  void TransposeArray(T *xyz_ptr, std::vector<int> const &transposition,
+                      std::vector<uint64_t> const &nx);
 };
 
 #endif
