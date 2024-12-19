@@ -667,18 +667,21 @@ void avtopenpmdFileFormat::TransposeArray(T *xyz_ptr,
 
   // compute transpose coefficients E, F, G
   // (these depend on the transposition)
+  size_t E, F, G;
 
-  // TODO(benwibking): add 3d transposition
-#if 0
-  const size_t E = 1;
-  const size_t F = nx[1];
-  const size_t G = nx[1] * nx[2];
-#endif
-
-  // 2d transposition
-  const size_t E = 1;
-  const size_t F = nx[1];
-  const size_t G = nx[1] * nx[2];
+  if (transposition == _3d) {
+    // TODO(benwibking): verify that this is correct
+    E = 1;
+    F = nx[0];
+    G = nx[0] * nx[1];
+  } else if (transposition == _2d) {
+    // TODO(benwibking): verify that this is correct
+    E = 1;
+    F = nx[1];
+    G = nx[1] * nx[2];
+  } else {
+    throw std::runtime_error("unsupported transposition!");
+  }
 
   // now do the transpose on the original array
   for (int k = 0; k < nx[0]; ++k) {
