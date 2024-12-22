@@ -64,7 +64,9 @@ public:
   // For 3D data : in case of (z, y, x) ordering of axes
   const std::vector<int> _3d = {2, 1, 0};
   // For 2D data : in case of (z, x) ordering of axes
-  const std::vector<int> _2d = {1, 2, 0};
+  const std::vector<int> _2d_xz = {1, 2, 0};
+  // For 2D data : in case of (y, x) ordering of axes
+  const std::vector<int> _2d_xy = {1, 0, 2};
   // For 1D data : in case data layout (z)
   const std::vector<int> _1d = {2, 1, 0};
   // identity transpose
@@ -93,7 +95,14 @@ protected:
 
   template <typename T> avtCentering GetCenteringType(T const &mesh);
 
-  bool MeshNeedsTranspose(openPMD::Mesh const &mesh);
+  std::vector<int> GetMeshTranspose(openPMD::Mesh const &mesh);
+
+  std::vector<int> GetIndexOrder(openPMD::Mesh::DataOrder const &dataOrder,
+                                 std::vector<std::string> axisLabels);
+
+  std::tuple<size_t, size_t, size_t>
+  GetIndexCoefficients(std::vector<int> const &indexOrder,
+                       std::vector<uint64_t> const &ndims);
 
   template <typename T>
   std::vector<T> TransposeVector(std::vector<T> const &vec,
@@ -101,8 +110,8 @@ protected:
                                  T fill_value);
 
   template <typename T>
-  void TransposeArray(T *xyz_ptr, std::vector<int> const &transposition,
-                      std::vector<uint64_t> const &nx);
+  void TransposeArray(T *data_ptr, openPMD::Mesh const &mesh,
+                      openPMD::Mesh::MeshRecordComponent const &rcomp);
 };
 
 #endif
