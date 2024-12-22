@@ -6,13 +6,17 @@ Supported:
 * Cartesian geometry
 * Uniform grids
 * Cell-centered variables
-
-Not working:
 * Node-centered variables
+* Particles
+
+Buggy:
+* Data layout transformation
 
 Currently unsupported:
-* Particles
 * AMR meshes
+* Parallel reads using MPI
+
+Unplanned:
 * non-Cartesian geometry
-* Face-, edge-centered variables
-* Parallel reads (using MPI)
+* Face-centered variables
+* Edge-centered variables
