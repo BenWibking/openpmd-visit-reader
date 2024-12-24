@@ -45,9 +45,21 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
 
   // read incomplete filepath string from file 'filename'
   std::string opmd_filestring;
+  std::string opmd_overrideAxisLabels;
   {
     std::ifstream file(filename);
+    // get file string
     std::getline(file, opmd_filestring);
+    // if it exists, get overrideAxisLabels
+    std::getline(file, opmd_overrideAxisLabels);
+    if (opmd_overrideAxisLabels != "") {
+      doOverrideAxisOrder_ = true;
+      auto iss = std::istringstream{opmd_overrideAxisLabels};
+      auto str = std::string{};
+      while (iss >> str) {
+        overrideAxisLabels_.push_back(str);
+      }
+    }
     file.close();
   }
 
@@ -388,8 +400,8 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
 
   // read particle positions and particle offsets, and their units
 
-  // NOTE: particle position/offsets can by any of: float, double, int32, uint32,
-  // int64, or uint64! (offsets are more likely to be integer types)
+  // NOTE: particle position/offsets can by any of: float, double, int32,
+  // uint32, int64, or uint64! (offsets are more likely to be integer types)
 
   // TODO(benwibking): use std::visit to handle all of these
 
@@ -722,14 +734,22 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
   auto dataOrder = mesh.dataOrder();
 
   // get axis labels
-  auto axisLabels = mesh.axisLabels();
+  std::vector<std::string> axisLabels = mesh.axisLabels();
+  if (doOverrideAxisOrder_) {
+    // for debugging
+    debug5 << "Overriding axis labels. As-written axis labels: ";
+    for (auto label : axisLabels) {
+      debug5 << label << " ";
+    }
+    debug5 << '\n';
 
-#if 0
-  // for example_3d dataset, axis labels appear to be wrong
-  // DEBUGGING ONLY!!!
-  std::vector<std::string> axisLabels = {std::string("z"), std::string("y"),
-                                         std::string("x")};
-#endif
+    axisLabels = overrideAxisLabels_; // must be the same size as original axisLabels!
+    debug5 << "\tNew axis labels: ";
+    for (auto label : axisLabels) {
+      debug5 << label << " ";
+    }
+    debug5 << '\n';
+  }
 
   // get array extents
   auto extent = mesh.getExtent();

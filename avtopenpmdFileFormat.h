@@ -88,6 +88,8 @@ protected:
                // name
   std::unordered_map<std::string, std::tuple<DatasetType, std::string>>
       meshMap_; // from VisIt mesh name, get openPMD mesh name AND DatasetType
+  bool doOverrideAxisOrder_{false};
+  std::vector<std::string> overrideAxisLabels_;
 
   virtual void PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
   void ReadFieldMetaData(avtDatabaseMetaData *md, openPMD::Iteration const &i);
