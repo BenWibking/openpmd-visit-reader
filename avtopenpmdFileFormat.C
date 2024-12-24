@@ -313,31 +313,17 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   }
 
   // openPMD geometry
-  const int ndims = mesh.axisLabels().size();
-  std::vector<double> in_gridSpacing = mesh.gridSpacing<double>();
-  std::vector<double> in_gridOrigin = mesh.gridGlobalOffset();
-  std::vector<std::uint64_t> in_gridExtent = mesh.getExtent();
-
-  std::vector<double> gridSpacing;
-  std::vector<double> gridOrigin;
-  std::vector<std::uint64_t> gridExtent;
-
+  const int ndims = mesh.axisLabels().size(); // topological dimension
+  const GeometryData geom = GetGeometryXYZ(mesh);
   double gridUnitSI =
       mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
 
-  // https://gitlab.kitware.com/paraview/paraview/-/blob/master/Wrapping/Python/paraview/algorithms/openpmd.py#L704
-  auto transposition = GetMeshTranspose(mesh);
-  gridExtent = TransposeVector(in_gridExtent, transposition, 1ULL);
-  gridSpacing = TransposeVector(in_gridSpacing, transposition, 0.);
-  gridOrigin = TransposeVector(in_gridOrigin, transposition, 0.);
-
   // debugging
-  debug5 << "gridExtent.size() = " << gridExtent.size() << '\n';
-
   for (int idim = 0; idim < 3; ++idim) {
-    debug5 << "gridExtent[" << idim << "] = " << gridExtent[idim] << '\n';
-    debug5 << "gridSpacing[" << idim << "] = " << gridSpacing[idim] << '\n';
-    debug5 << "gridOrigin[" << idim << "] = " << gridOrigin[idim] << '\n';
+    debug5 << "gridExtent[" << idim << "] = " << geom.extent[idim] << '\n';
+    debug5 << "gridSpacing[" << idim << "] = " << geom.gridSpacing[idim]
+           << '\n';
+    debug5 << "gridOrigin[" << idim << "] = " << geom.gridOrigin[idim] << '\n';
   }
   debug5 << '\n';
 
@@ -349,40 +335,15 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
 
   for (int idim = 0; idim < 3; ++idim) {
     // rescale code units to SI units
-    origin[idim] = gridUnitSI * gridOrigin[idim];
-    spacing[idim] = gridUnitSI * gridSpacing[idim];
+    origin[idim] = gridUnitSI * geom.gridOrigin[idim];
+    spacing[idim] = gridUnitSI * geom.gridSpacing[idim];
 
     if (cent == AVT_ZONECENT) {
-      dims[idim] = static_cast<int>(gridExtent[idim]) + 1;
+      dims[idim] = static_cast<int>(geom.extent[idim]) + 1;
     } else if (cent == AVT_NODECENT) {
-      dims[idim] = static_cast<int>(gridExtent[idim]);
+      dims[idim] = static_cast<int>(geom.extent[idim]);
     }
   }
-
-  // debugging output
-  std::string meshPrefix = meshname;
-  std::string axisLabels = "";
-  for (auto const &val : mesh.axisLabels())
-    axisLabels += val + ", ";
-  std::string gridSpacing_str = "";
-  for (auto const &val : mesh.gridSpacing<float>())
-    gridSpacing_str += std::to_string(val) + ", ";
-  std::string gridGlobalOffset = "";
-  for (auto const &val : mesh.gridGlobalOffset())
-    gridGlobalOffset += std::to_string(val) + ", ";
-  std::string gridExtent_str = "";
-  for (auto const &val : mesh.getExtent())
-    gridExtent_str += std::to_string(val) + ", ";
-
-  debug5 << "[openpmd-api-plugin] " << meshPrefix << ".geometry - "
-         << mesh.geometry() << '\n'
-         << meshPrefix << ".dataOrder - " << mesh.dataOrder() << '\n'
-         << meshPrefix << ".axisLabels - " << axisLabels << '\n'
-         << meshPrefix << ".gridSpacing - " << gridSpacing_str << '\n'
-         << meshPrefix << ".gridGlobalOffset - " << gridGlobalOffset << '\n'
-         << meshPrefix << ".getExtent - " << gridExtent_str << '\n'
-         << '\n'
-         << '\n';
 
   // TODO(benwibking): loop over chunks and create separate vtkUniformGrids
   // for each chunk and assemble into an AMR mesh. This is necessary for files
@@ -611,16 +572,10 @@ void avtopenpmdFileFormat::ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI) {
 }
 
 std::vector<int>
-avtopenpmdFileFormat::GetIndexOrder(openPMD::Mesh::DataOrder const &dataOrder,
-                                    std::vector<std::string> axisLabels) {
+avtopenpmdFileFormat::GetIndexOrder(std::vector<std::string> axisLabels) {
   // Returns the index ordering (from slowest index to fastest)
   // of data that has data order 'dataOrder' and axis labels 'axisLabels'
   // The index returned for x is 0, y is 1, and z is 2.
-
-  // reverse ordering if mesh.DataOrder() == DataOrder::F
-  if (dataOrder == openPMD::Mesh::DataOrder::F) {
-    std::reverse(axisLabels.begin(), axisLabels.end());
-  }
 
   // get index ordering from axisLabels
   std::vector<int> indexOrder{};
@@ -651,6 +606,15 @@ avtopenpmdFileFormat::GetIndexCoefficients(std::vector<int> const &indexOrder,
   // B = 1 * ndims[0];
   // C = 1 * ndims[1] * ndims[0];
 
+  // EXAMPLE Data index order: 1 0 2 == Y, X, Z (slowest to fastest)
+  // A = 1 * ndims[2]
+  // B = 1 * ndims[0] * ndims[2]
+  // C = 1
+  // EXAMPLE Data index order: 0 2 1  == X, Z, Y (slowest to fastest)
+  // A = 1 * ndims[2] * ndims[1] = 201
+  // B = 1
+  // C = 1 * ndims[1] = 201
+
   size_t A[3] = {1, 1, 1};
   for (int ii = 0; ii < 3; ++ii) {
     for (int jj = ii + 1; jj < 3; ++jj) {
@@ -665,41 +629,13 @@ void avtopenpmdFileFormat::TransposeArray(
     T *data_ptr, openPMD::Mesh const &mesh,
     openPMD::Mesh::MeshRecordComponent const &rcomp) {
   /// Transpose data array from input ordering to VTK ordering
-  
-  // TODO(benwibking): FIXME -- still wrong for x,y,z input data and z,x input data
 
-  // get data extents
-  auto extent = rcomp.getExtent();
+  // TODO(benwibking): FIXME -- still wrong for x,y,z input data and z,x input
+  // data
 
-  // get data order (C or Fortran)
-  auto dataOrder = mesh.dataOrder();
-  debug5 << "Data order: " << dataOrder << '\n';
-
-  auto axisLabels = mesh.axisLabels();
-
-  if (dataOrder == openPMD::Mesh::DataOrder::C) {
-    // add any missing axis labels at the *beginning* with extent 1
-    std::vector<std::string> canonicalAxes = {
-        std::string("z"), std::string("y"), std::string("x")};
-    for (auto const &axis : canonicalAxes) {
-      if (std::find(axisLabels.begin(), axisLabels.end(), axis) ==
-          axisLabels.end()) {
-        axisLabels.insert(axisLabels.begin(), axis);
-        extent.insert(extent.begin(), 1);
-      }
-    }
-  } else {
-    // add any missing axis labels at the *end* with extent 1
-    std::vector<std::string> canonicalAxes = {
-        std::string("x"), std::string("y"), std::string("z")};
-    for (auto const &axis : canonicalAxes) {
-      if (std::find(axisLabels.begin(), axisLabels.end(), axis) ==
-          axisLabels.end()) {
-        axisLabels.push_back(axis);
-        extent.push_back(1);
-      }
-    }
-  }
+  GeometryData geom = GetGeometry3D(mesh);
+  auto axisLabels = geom.axisLabels;
+  auto extent = geom.extent;
 
   debug5 << "Data extents: ";
   for (auto const &nx : extent) {
@@ -713,7 +649,7 @@ void avtopenpmdFileFormat::TransposeArray(
   debug5 << '\n';
 
   // get index ordering from axisLabels
-  std::vector<int> indexOrder = GetIndexOrder(dataOrder, axisLabels);
+  std::vector<int> indexOrder = GetIndexOrder(axisLabels);
   debug5 << "Data index order: " << indexOrder[0] << " " << indexOrder[1] << " "
          << indexOrder[2] << '\n';
 
@@ -726,15 +662,14 @@ void avtopenpmdFileFormat::TransposeArray(
   // increases fastest, followed by Y, followed by Z."
   // https://public.kitware.com/pipermail/vtkusers/2016-September/096626.html
   std::vector<int> vtkIndexOrder =
-      GetIndexOrder(openPMD::Mesh::DataOrder::F,
-                    {std::string("x"), std::string("y"), std::string("z")});
+      GetIndexOrder({std::string("z"), std::string("y"), std::string("x")});
   debug5 << "VTK index order: " << vtkIndexOrder[0] << " " << vtkIndexOrder[1]
          << " " << vtkIndexOrder[2] << '\n';
 
   // transpose coefficients E, F, G
-  // EXAMPLE indexOrder: 2, 1, 0 == Z, Y, X (from slowest index to fastest)
-  // C = 1 * ndims[1] * ndims[0]
-  // B = 1 * ndims[0]
+  // VTK indexOrder: 2, 1, 0 == Z, Y, X (from slowest index to fastest)
+  // C = ndims[1] * ndims[0] * 1
+  // B = ndims[0] * 1
   // A = 1;
   auto [E, F, G] = GetIndexCoefficients(vtkIndexOrder, extent);
   debug5 << "Transpose coefficients: E = " << E << ", F = " << F
@@ -753,6 +688,7 @@ void avtopenpmdFileFormat::TransposeArray(
   // is this the identity?
   if ((A == E) && (B == F) && (C == G)) {
     // this is the identity transpose, so we don't need to do anything
+    debug5 << "TransposeArray(): identity transpose requested, skipping.\n";
     return;
   }
 
@@ -766,61 +702,105 @@ void avtopenpmdFileFormat::TransposeArray(
       for (int k = 0; k < extent[2]; ++k) {
         const size_t fromIndex = i * A + j * B + k * C;
         const size_t toIndex = i * E + j * F + k * G;
+        assert(fromIndex >= 0);
+        assert(fromIndex < len);
+        assert(toIndex >= 0);
+        assert(toIndex < len);
         data_ptr[toIndex] = data_copy[fromIndex];
       }
     }
   }
 }
 
-std::vector<int>
-avtopenpmdFileFormat::GetMeshTranspose(openPMD::Mesh const &mesh) {
-  std::vector<std::string> axisLabels = mesh.axisLabels();
-  std::vector<std::string> canonicalAxes = {std::string("x"), std::string("y"),
-                                            std::string("z")};
+GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
+  // get dataOrder
+  auto dataOrder = mesh.dataOrder();
 
-  // add any missing axis labels at the end
+  // get axis labels
+  auto axisLabels = mesh.axisLabels();
+  // get array extents
+  auto extent = mesh.getExtent();
+  // get grid spacing
+  std::vector<double> gridSpacing = mesh.gridSpacing<double>();
+  // get grid origin
+  std::vector<double> gridOrigin = mesh.gridGlobalOffset();
+
+  // reverse ordering if mesh.DataOrder() == DataOrder::F
+  if (dataOrder == openPMD::Mesh::DataOrder::F) {
+    std::reverse(axisLabels.begin(), axisLabels.end());
+    std::reverse(extent.begin(), extent.end());
+    std::reverse(gridSpacing.begin(), gridSpacing.end());
+    std::reverse(gridOrigin.begin(), gridOrigin.end());
+  }
+
+  // add any missing axis labels at the *beginning* with extent 1
+  std::vector<std::string> canonicalAxes = {std::string("z"), std::string("y"),
+                                            std::string("x")};
   for (auto const &axis : canonicalAxes) {
     if (std::find(axisLabels.begin(), axisLabels.end(), axis) ==
         axisLabels.end()) {
-      axisLabels.push_back(axis);
+      axisLabels.insert(axisLabels.begin(), axis);
+      extent.insert(extent.begin(), 1);
+      gridSpacing.insert(gridSpacing.begin(), 0);
+      gridOrigin.insert(gridOrigin.begin(), 0);
     }
   }
 
-  // get indices of 'x', 'y', and 'z' labels, in that order
-  std::vector<int> indices;
-  for (auto const &axis : canonicalAxes) {
-    auto iter = std::find(axisLabels.begin(), axisLabels.end(), axis);
-    const int idx = std::distance(axisLabels.begin(), iter);
-    assert(idx >= 0);
-    assert(idx <= 2);
-    indices.push_back(idx);
-  }
+  GeometryData geom;
+  geom.axisLabels = axisLabels;
+  geom.extent = extent;
+  geom.gridOrigin = gridOrigin;
+  geom.gridSpacing = gridSpacing;
+  return geom;
+}
 
-  // debugging
-  debug5 << "GetMeshTranspose: ";
-  for (auto idx : indices) {
-    debug5 << idx << " ";
-  }
-  debug5 << '\n';
+std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
+    std::vector<std::string> const &axisLabels) {
+  const std::vector<std::string> cartesianAxes = {
+      std::string("x"), std::string("y"), std::string("z")};
 
-  return indices;
+  auto getIndexOf = [](std::string const &e,
+                       std::vector<std::string> const &v) {
+    return std::distance(v.begin(), std::find(v.begin(), v.end(), e));
+  };
+
+  // compute transposition that takes axisLabels to {'x', 'y', 'z'}
+  std::vector<int> transpose{};
+  for (auto axis : cartesianAxes) {
+    transpose.push_back(getIndexOf(axis, axisLabels));
+  }
+  return transpose;
 }
 
 template <typename T>
-std::vector<T>
-avtopenpmdFileFormat::TransposeVector(std::vector<T> const &in_vec,
-                                      const std::vector<int> &transpose,
-                                      const T fill_value) {
-  std::vector<T> vec = {fill_value, fill_value, fill_value};
-  for (int i = 0; i < in_vec.size(); ++i) {
-    vec[i] = in_vec[i];
+void avtopenpmdFileFormat::TransposeVector(std::vector<T> &vec_to_transpose,
+                                           std::vector<int> const &transpose) {
+  // compute transposition that takes axisLabels to {'x', 'y', 'z'}
+  std::vector<T> vec = vec_to_transpose;
+  for (int i = 0; i < vec.size(); ++i) {
+    vec_to_transpose[i] = vec[transpose[i]];
   }
+}
 
-  std::vector<T> new_vec(3);
-  for (int i = 0; i < 3; ++i) {
-    new_vec[i] = vec[transpose[i]];
-  }
-  return std::move(new_vec);
+GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh) {
+  GeometryData geom = GetGeometry3D(mesh);
+
+  // compute transposition of axisLabels -> {'x', 'y', 'z'}
+  auto axisLabels = geom.axisLabels;
+  auto transpose = GetAxisTranspose(axisLabels);
+
+  // transpose geometry data
+  TransposeVector(geom.axisLabels, transpose);
+  TransposeVector(geom.extent, transpose);
+  TransposeVector(geom.gridSpacing, transpose);
+  TransposeVector(geom.gridOrigin, transpose);
+
+  // verify we did it right
+  assert(geom.axisLabels[0] == std::string("x"));
+  assert(geom.axisLabels[1] == std::string("y"));
+  assert(geom.axisLabels[2] == std::string("z"));
+
+  return geom;
 }
 
 // ****************************************************************************
