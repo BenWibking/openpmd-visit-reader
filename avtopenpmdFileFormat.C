@@ -505,7 +505,9 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
     double xp = unitSI_x * x.at(j) + unitSI_xoff * xoff.at(j);
     double yp = unitSI_y * y.at(j) + unitSI_yoff * yoff.at(j);
     double zp = unitSI_z * z.at(j) + unitSI_zoff * zoff.at(j);
-    pts->SetPoint(j, xp, yp, zp);
+    //pts->SetPoint(j, xp, yp, zp);
+    // for example_3d dataset, particle coordinate labels appear to be wrong
+    pts->SetPoint(j, zp, yp, xp); // DEBUGGING ONLY!!!
   }
 
   vtkCellArray *verts = vtkCellArray::New();
@@ -717,9 +719,16 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
   auto dataOrder = mesh.dataOrder();
 
   // get axis labels
-  auto axisLabels = mesh.axisLabels();
+  // auto axisLabels = mesh.axisLabels();
+  
+  // for example_3d dataset, axis labels appear to be wrong
+  // DEBUGGING ONLY!!!
+  std::vector<std::string> axisLabels = {std::string("z"), std::string("y"),
+                                         std::string("x")};
+
   // get array extents
   auto extent = mesh.getExtent();
+
   // get grid spacing
   std::vector<double> gridSpacing = mesh.gridSpacing<double>();
   // get grid origin
