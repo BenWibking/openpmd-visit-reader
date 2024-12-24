@@ -387,8 +387,12 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
   openPMD::ParticleSpecies species = i.particles[meshname];
 
   // read particle positions and particle offsets, and their units
-  // TODO: particle position/offsets can by any of: float, double, int, uint,
+
+  // NOTE: particle position/offsets can by any of: float, double, int32, uint32,
   // int64, or uint64! (offsets are more likely to be integer types)
+
+  // TODO(benwibking): use std::visit to handle all of these
+
   std::vector<double> x;
   std::vector<double> y;
   std::vector<double> z;
@@ -505,9 +509,11 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
     double xp = unitSI_x * x.at(j) + unitSI_xoff * xoff.at(j);
     double yp = unitSI_y * y.at(j) + unitSI_yoff * yoff.at(j);
     double zp = unitSI_z * z.at(j) + unitSI_zoff * zoff.at(j);
-    //pts->SetPoint(j, xp, yp, zp);
-    // for example_3d dataset, particle coordinate labels appear to be wrong
+    pts->SetPoint(j, xp, yp, zp);
+#if 0
+    //  for example_3d dataset, particle coordinate labels appear to be wrong
     pts->SetPoint(j, zp, yp, xp); // DEBUGGING ONLY!!!
+#endif
   }
 
   vtkCellArray *verts = vtkCellArray::New();
@@ -632,9 +638,6 @@ void avtopenpmdFileFormat::TransposeArray(
     openPMD::Mesh::MeshRecordComponent const &rcomp) {
   /// Transpose data array from input ordering to VTK ordering
 
-  // TODO(benwibking): FIXME -- still wrong for x,y,z input data and z,x input
-  // data
-
   GeometryData geom = GetGeometry3D(mesh);
   auto axisLabels = geom.axisLabels;
   auto extent = geom.extent;
@@ -719,12 +722,14 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
   auto dataOrder = mesh.dataOrder();
 
   // get axis labels
-  // auto axisLabels = mesh.axisLabels();
-  
+  auto axisLabels = mesh.axisLabels();
+
+#if 0
   // for example_3d dataset, axis labels appear to be wrong
   // DEBUGGING ONLY!!!
   std::vector<std::string> axisLabels = {std::string("z"), std::string("y"),
                                          std::string("x")};
+#endif
 
   // get array extents
   auto extent = mesh.getExtent();
@@ -797,6 +802,9 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh) {
   // compute transposition of axisLabels -> {'x', 'y', 'z'}
   auto axisLabels = geom.axisLabels;
   auto transpose = GetAxisTranspose(axisLabels);
+
+  debug5 << "Mesh transpose: " << transpose[0] << ", " << transpose[1] << ", "
+         << transpose[2] << '\n';
 
   // transpose geometry data
   TransposeVector(geom.axisLabels, transpose);
