@@ -13,6 +13,7 @@ Buggy:
 * Data layout transformation
 
 Currently unsupported:
+* Particle data (other than positions)
 * AMR meshes
 * Parallel reads using MPI
 
