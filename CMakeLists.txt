@@ -34,8 +34,13 @@ ${VISIT_DATABASE_INCLUDES}
 
 LINK_DIRECTORIES(${VISIT_LIBRARY_DIR})
 
-# link to OpenPMD-api outside of the VisIt build
-find_package(OpenPMD REQUIRED)
+# OpenPMD-api superbuild
+set(openPMD_USE_PYTHON OFF CACHE BOOL "")
+set(openPMD_BUILD_TESTING OFF CACHE BOOL "")
+set(openPMD_BUILD_EXAMPLES OFF CACHE BOOL "")
+set(openPMD_BUILD_CLI_TOOLS OFF CACHE BOOL "")
+set(openPMD_INSTALL OFF CACHE BOOL "")
+add_subdirectory(${openpmd_database_SOURCE_DIR}/extern/openPMD-api ${openpmd_database_BINARY_DIR}/openPMD-api)
 include_directories(${OpenPMD_INCLUDE_DIRS_RET})
 link_libraries(openPMD::openPMD)
 
