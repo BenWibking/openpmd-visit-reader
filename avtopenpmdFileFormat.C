@@ -79,15 +79,15 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
 
   // read iteration count
   debug5 << "[openpmd-api-plugin] "
-         << "This file contains " << series_.iterations.size()
+         << "This file contains " << series_.snapshots().size()
          << " iterations:";
-  iterationIndex_ = std::vector<unsigned long long>(series_.iterations.size());
+  iterationIndex_ = std::vector<unsigned long long>(series_.snapshots().size());
 
   // save map from timeState to iteration index
   // NOTE: openPMD's iteration index can be an arbitrary number, and can
   // skip numbers. For instance, a dataset can have iterations = {550, 600}.
   int timeState = 0;
-  for (auto const &iter : series_.iterations) {
+  for (auto const &iter : series_.snapshots()) {
     debug5 << "\n\t" << iter.first;
     iterationIndex_.at(timeState) = iter.first;
     timeState++;
@@ -107,7 +107,7 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
 // ****************************************************************************
 
 int avtopenpmdFileFormat::GetNTimesteps(void) {
-  return series_.iterations.size();
+  return series_.snapshots().size();
 }
 
 // ****************************************************************************
@@ -303,7 +303,7 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
          << "PopulateDatabaseMetaData() for iteration " << iterIdx << "\n";
 
   // open openPMD::Iteration 'iter'
-  openPMD::Iteration iter = series_.iterations[iterIdx];
+  openPMD::Iteration iter = series_.snapshots()[iterIdx];
 
   // read fields
   ReadFieldMetaData(md, iter);
@@ -570,7 +570,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
          << visit_meshname << "\n";
 
   // open openPMD::Iteration 'iter'
-  openPMD::Iteration i = series_.iterations[iter];
+  openPMD::Iteration i = series_.snapshots()[iter];
 
   // get actual meshname
   auto [dataset_type, meshname] = meshMap_[visit_meshname];
@@ -870,7 +870,7 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
          << std::endl;
 
   // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
-  openPMD::Iteration i = series_.iterations[iter];
+  openPMD::Iteration i = series_.snapshots()[iter];
   openPMD::Mesh mesh = i.meshes[meshname];
   openPMD::MeshRecordComponent rcomp = mesh[rcname];
 
