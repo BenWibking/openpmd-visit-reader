@@ -28,6 +28,7 @@
 #include <InvalidVariableException.h>
 
 #include "avtopenpmdFileFormat.h"
+#include "dataLayoutTransform.h"
 
 // ****************************************************************************
 //  Method: avtopenpmdFileFormat constructor
@@ -125,48 +126,6 @@ int avtopenpmdFileFormat::GetNTimesteps(void) {
 // ****************************************************************************
 
 void avtopenpmdFileFormat::FreeUpResources(void) {}
-
-template <typename T>
-avtCentering avtopenpmdFileFormat::GetCenteringType(T const &mesh) {
-  // read the element centering
-  std::vector<float> centering;
-  try {
-    centering = mesh.template position<float>();
-  } catch (openPMD::Error) {
-    debug5 << "[openpmd-api-plugin] "
-           << "Can't read centering for mesh!\n";
-    return AVT_UNKNOWN_CENT;
-  }
-
-  // cell-centered == {0.5, 0.5, 0.5}
-  bool isCellCentered = true;
-  for (int idim = 0; idim < centering.size(); idim++) {
-    isCellCentered = (isCellCentered && (centering[idim] == 0.5));
-  }
-
-  // node-centered == {0, 0, 0}
-  bool isNodeCentered = true;
-  for (int idim = 0; idim < centering.size(); idim++) {
-    isNodeCentered = (isNodeCentered && (centering[idim] == 0.));
-  }
-
-  if (isCellCentered) {
-    debug5 << "[openpmd-api-plugin] "
-           << "Mesh is cell-centered.\n";
-    return AVT_ZONECENT;
-  } else if (isNodeCentered) {
-    debug5 << "[openpmd-api-plugin] "
-           << "Mesh is node-centered.\n";
-    return AVT_NODECENT;
-  }
-
-  // face-centered == {0, 0.5, 0.5}, etc.
-  // edge-centered == {0, 0, 0.5}, etc.
-  // However, all other centerings are unsupported by VisIt.
-  debug5 << "[openpmd-api-plugin] "
-         << "Mesh has unsupported centering.\n";
-  return AVT_UNKNOWN_CENT;
-}
 
 void avtopenpmdFileFormat::ReadFieldMetaData(avtDatabaseMetaData *md,
                                              openPMD::Iteration const &i) {
@@ -584,150 +543,6 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
   return 0;
 }
 
-template <typename T>
-void avtopenpmdFileFormat::ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI) {
-  for (size_t idx = 0; idx < nelem; idx++) {
-    xyz_ptr[idx] *= unitSI;
-  }
-}
-
-std::vector<int>
-avtopenpmdFileFormat::GetIndexOrder(std::vector<std::string> axisLabels) {
-  // Returns the index ordering (from slowest index to fastest)
-  // of data that has data order 'dataOrder' and axis labels 'axisLabels'
-  // The index returned for x is 0, y is 1, and z is 2.
-
-  // get index ordering from axisLabels
-  std::vector<int> indexOrder{};
-  for (std::string const &axisLabel : axisLabels) {
-    if (axisLabel == "x") {
-      indexOrder.push_back(0);
-    } else if (axisLabel == "y") {
-      indexOrder.push_back(1);
-    } else if (axisLabel == "z") {
-      indexOrder.push_back(2);
-    }
-  }
-  return indexOrder;
-}
-
-std::tuple<size_t, size_t, size_t>
-avtopenpmdFileFormat::GetIndexCoefficients(std::vector<int> const &indexOrder,
-                                           std::vector<uint64_t> const &ndims) {
-  // Returns the index coefficients A, B, C for a given index ordering
-
-  // compute coefficients
-  // EXAMPLE indexOrder: 0, 1, 2 == X, Y, Z (from slowest index to fastest)
-  // A = 1 * ndims[1] * ndims[2]
-  // B = 1 * ndims[2]
-  // C = 1;
-  // EXAMPLE indexOrder: 2, 1, 0 == Z, Y, X (from slowest index to fastest)
-  // A = 1;
-  // B = 1 * ndims[0];
-  // C = 1 * ndims[1] * ndims[0];
-
-  // EXAMPLE Data index order: 1 0 2 == Y, X, Z (slowest to fastest)
-  // A = 1 * ndims[2]
-  // B = 1 * ndims[0] * ndims[2]
-  // C = 1
-  // EXAMPLE Data index order: 0 2 1  == X, Z, Y (slowest to fastest)
-  // A = 1 * ndims[2] * ndims[1] = 201
-  // B = 1
-  // C = 1 * ndims[1] = 201
-
-  size_t A[3] = {1, 1, 1};
-  for (int ii = 0; ii < 3; ++ii) {
-    for (int jj = ii + 1; jj < 3; ++jj) {
-      A[indexOrder[ii]] *= ndims[indexOrder[jj]];
-    }
-  }
-  return {A[0], A[1], A[2]};
-}
-
-template <typename T>
-void avtopenpmdFileFormat::TransposeArray(
-    T *data_ptr, openPMD::Mesh const &mesh,
-    openPMD::Mesh::MeshRecordComponent const &rcomp) {
-  /// Transpose data array from input ordering to VTK ordering
-
-  GeometryData geom = GetGeometry3D(mesh);
-  auto axisLabels = geom.axisLabels;
-  auto extent = geom.extent;
-
-  debug5 << "Data extents: ";
-  for (auto const &nx : extent) {
-    debug5 << nx << ", ";
-  }
-
-  debug5 << "Data axis labels: ";
-  for (auto const &label : axisLabels) {
-    debug5 << label << " ";
-  }
-  debug5 << '\n';
-
-  // get index ordering from axisLabels
-  std::vector<int> indexOrder = GetIndexOrder(axisLabels);
-  debug5 << "Data index order: " << indexOrder[0] << " " << indexOrder[1] << " "
-         << indexOrder[2] << '\n';
-
-  // compute the transpose coefficients A, B, C from the axis ordering
-  auto [A, B, C] = GetIndexCoefficients(indexOrder, extent);
-  debug5 << "Transpose coefficients: A = " << A << ", B = " << B
-         << ", C = " << C << '\n';
-
-  // "VTK image data arrays are stored such that the X dimension
-  // increases fastest, followed by Y, followed by Z."
-  // https://public.kitware.com/pipermail/vtkusers/2016-September/096626.html
-  std::vector<int> vtkIndexOrder =
-      GetIndexOrder({std::string("z"), std::string("y"), std::string("x")});
-  debug5 << "VTK index order: " << vtkIndexOrder[0] << " " << vtkIndexOrder[1]
-         << " " << vtkIndexOrder[2] << '\n';
-
-  // transpose coefficients E, F, G
-  // VTK indexOrder: 2, 1, 0 == Z, Y, X (from slowest index to fastest)
-  // C = ndims[1] * ndims[0] * 1
-  // B = ndims[0] * 1
-  // A = 1;
-  auto [E, F, G] = GetIndexCoefficients(vtkIndexOrder, extent);
-  debug5 << "Transpose coefficients: E = " << E << ", F = " << F
-         << ", G = " << G << '\n';
-
-  size_t Gp = extent[1] * extent[0] * 1;
-  size_t Fp = extent[0] * 1;
-  size_t Ep = 1;
-
-  debug5 << "Transpose coefficients: Ep = " << Ep << ", Fp = " << Fp
-         << ", Gp = " << Gp << '\n';
-  assert(E == Ep);
-  assert(F == Fp);
-  assert(G == Gp);
-
-  // is this the identity?
-  if ((A == E) && (B == F) && (C == G)) {
-    // this is the identity transpose, so we don't need to do anything
-    debug5 << "TransposeArray(): identity transpose requested, skipping.\n";
-    return;
-  }
-
-  // do the transpose
-  const size_t len = extent[0] * extent[1] * extent[2];
-  std::vector<T> data_copy(len);
-  std::memcpy(data_copy.data(), data_ptr, len);
-
-  for (int i = 0; i < extent[0]; ++i) {
-    for (int j = 0; j < extent[1]; ++j) {
-      for (int k = 0; k < extent[2]; ++k) {
-        const size_t fromIndex = i * A + j * B + k * C;
-        const size_t toIndex = i * E + j * F + k * G;
-        assert(fromIndex >= 0);
-        assert(fromIndex < len);
-        assert(toIndex >= 0);
-        assert(toIndex < len);
-        data_ptr[toIndex] = data_copy[fromIndex];
-      }
-    }
-  }
-}
 
 GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
   // get dataOrder
@@ -786,34 +601,6 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
   geom.gridOrigin = gridOrigin;
   geom.gridSpacing = gridSpacing;
   return geom;
-}
-
-std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
-    std::vector<std::string> const &axisLabels) {
-  const std::vector<std::string> cartesianAxes = {
-      std::string("x"), std::string("y"), std::string("z")};
-
-  auto getIndexOf = [](std::string const &e,
-                       std::vector<std::string> const &v) {
-    return std::distance(v.begin(), std::find(v.begin(), v.end(), e));
-  };
-
-  // compute transposition that takes axisLabels to {'x', 'y', 'z'}
-  std::vector<int> transpose{};
-  for (auto axis : cartesianAxes) {
-    transpose.push_back(getIndexOf(axis, axisLabels));
-  }
-  return transpose;
-}
-
-template <typename T>
-void avtopenpmdFileFormat::TransposeVector(std::vector<T> &vec_to_transpose,
-                                           std::vector<int> const &transpose) {
-  // compute transposition that takes axisLabels to {'x', 'y', 'z'}
-  std::vector<T> vec = vec_to_transpose;
-  for (int i = 0; i < vec.size(); ++i) {
-    vec_to_transpose[i] = vec[transpose[i]];
-  }
 }
 
 GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh) {

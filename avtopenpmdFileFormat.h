@@ -14,6 +14,7 @@
 
 #include <openPMD/openPMD.hpp>
 
+#include <DebugStream.h>
 #include <avtMTSDFileFormat.h>
 
 struct GeometryData {
@@ -123,5 +124,54 @@ protected:
   void TransposeArray(T *data_ptr, openPMD::Mesh const &mesh,
                       openPMD::Mesh::MeshRecordComponent const &rcomp);
 };
+
+template <typename T>
+avtCentering avtopenpmdFileFormat::GetCenteringType(T const &mesh) {
+  // read the element centering
+  std::vector<float> centering;
+  try {
+    centering = mesh.template position<float>();
+  } catch (openPMD::Error) {
+    debug5 << "[openpmd-api-plugin] "
+           << "Can't read centering for mesh!\n";
+    return AVT_UNKNOWN_CENT;
+  }
+
+  // cell-centered == {0.5, 0.5, 0.5}
+  bool isCellCentered = true;
+  for (int idim = 0; idim < centering.size(); idim++) {
+    isCellCentered = (isCellCentered && (centering[idim] == 0.5));
+  }
+
+  // node-centered == {0, 0, 0}
+  bool isNodeCentered = true;
+  for (int idim = 0; idim < centering.size(); idim++) {
+    isNodeCentered = (isNodeCentered && (centering[idim] == 0.));
+  }
+
+  if (isCellCentered) {
+    debug5 << "[openpmd-api-plugin] "
+           << "Mesh is cell-centered.\n";
+    return AVT_ZONECENT;
+  } else if (isNodeCentered) {
+    debug5 << "[openpmd-api-plugin] "
+           << "Mesh is node-centered.\n";
+    return AVT_NODECENT;
+  }
+
+  // face-centered == {0, 0.5, 0.5}, etc.
+  // edge-centered == {0, 0, 0.5}, etc.
+  // However, all other centerings are unsupported by VisIt.
+  debug5 << "[openpmd-api-plugin] "
+         << "Mesh has unsupported centering.\n";
+  return AVT_UNKNOWN_CENT;
+}
+
+template <typename T>
+void avtopenpmdFileFormat::ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI) {
+  for (size_t idx = 0; idx < nelem; idx++) {
+    xyz_ptr[idx] *= unitSI;
+  }
+}
 
 #endif

@@ -19,12 +19,14 @@ SET(LIBM_SOURCES
 openpmdMDServerPluginInfo.C
 ${COMMON_SOURCES}
 avtopenpmdFileFormat.C
+dataLayoutTransform.C
 )
 
 SET(LIBE_SOURCES
 openpmdEnginePluginInfo.C
 ${COMMON_SOURCES}
 avtopenpmdFileFormat.C
+dataLayoutTransform.C
 )
 
 INCLUDE_DIRECTORIES(
