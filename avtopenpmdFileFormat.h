@@ -89,8 +89,11 @@ protected:
                // name
   std::unordered_map<std::string, std::tuple<DatasetType, std::string>>
       meshMap_; // from VisIt mesh name, get openPMD mesh name AND DatasetType
-  bool doOverrideAxisOrder_{false};
-  std::vector<std::string> overrideAxisLabels_;
+
+  bool doOverrideMeshAxisOrder_{false};
+  bool doOverrideParticleAxisOrder_{false};
+  std::vector<std::string> overrideMeshAxisLabels_;
+  std::vector<std::string> overrideParticleAxisLabels_;
 
   virtual void PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
   void ReadFieldMetaData(avtDatabaseMetaData *md, openPMD::Iteration const &i);
@@ -105,8 +108,11 @@ protected:
 
   template <typename T> avtCentering GetCenteringType(T const &mesh);
 
-  GeometryData GetGeometry3D(openPMD::Mesh const &mesh);
-  GeometryData GetGeometryXYZ(openPMD::Mesh const &mesh);
+  GeometryData GetGeometry3D(openPMD::Mesh const &mesh,
+                             bool insertMissingAxes = true);
+
+  GeometryData GetGeometryXYZ(openPMD::Mesh const &mesh,
+                              bool insertMissingAxes = true);
 
   std::vector<int> GetIndexOrder(std::vector<std::string> axisLabels);
 
@@ -115,10 +121,6 @@ protected:
   template <typename T>
   void TransposeVector(std::vector<T> &vec_to_transpose,
                        std::vector<int> const &transpose);
-
-  std::tuple<size_t, size_t, size_t>
-  GetIndexCoefficients(std::vector<int> const &indexOrder,
-                       std::vector<uint64_t> const &ndims);
 
   template <typename T>
   void TransposeArray(T *data_ptr, openPMD::Mesh const &mesh,

@@ -1,3 +1,6 @@
 [submodule "external/openPMD-api"]
 	path = extern/openPMD-api
 	url = https://github.com/openPMD/openPMD-api.git
+[submodule "extern/mdspan"]
+	path = extern/mdspan
+	url = https://github.com/kokkos/mdspan.git

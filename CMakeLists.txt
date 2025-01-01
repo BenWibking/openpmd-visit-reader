@@ -46,6 +46,11 @@ add_subdirectory(${openpmd_database_SOURCE_DIR}/extern/openPMD-api ${openpmd_dat
 include_directories(${OpenPMD_INCLUDE_DIRS_RET})
 link_libraries(openPMD::openPMD)
 
+# mdspan
+add_subdirectory(${openpmd_database_SOURCE_DIR}/extern/mdspan ${openpmd_database_BINARY_DIR}/mdspan)
+include_directories(${mdspan_INCLUDE_DIRS_RET})
+link_libraries(std::mdspan)
+
 ADD_LIBRARY(IopenpmdDatabase ${LIBI_SOURCES})
 TARGET_LINK_LIBRARIES(IopenpmdDatabase visitcommon)
 SET(INSTALLTARGETS IopenpmdDatabase)

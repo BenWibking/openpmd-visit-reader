@@ -2,13 +2,12 @@
 //  dataLayoutTransform.C
 // ****************************************************************************
 
+#include <DebugStream.h>
 #include <cstddef>
-#include <cstdint>
 #include <string>
 
-#include <DebugStream.h>
-
 #include "avtopenpmdFileFormat.h"
+#include "dataLayoutTransform.h"
 
 std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
     std::vector<std::string> const &axisLabels) {
@@ -17,66 +16,108 @@ std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
 
   auto getIndexOf = [](std::string const &e,
                        std::vector<std::string> const &v) {
-    return std::distance(v.begin(), std::find(v.begin(), v.end(), e));
+    auto iter = std::find(v.begin(), v.end(), e);
+    if (iter != v.end()) {
+      return std::distance(v.begin(), iter);
+    } else {
+      return -1L;
+    }
   };
 
   // compute transposition that takes axisLabels to {'x', 'y', 'z'}
   std::vector<int> transpose{};
   for (auto axis : cartesianAxes) {
-    transpose.push_back(getIndexOf(axis, axisLabels));
+    auto idx = getIndexOf(axis, axisLabels);
+    if (idx != -1L) {
+      transpose.push_back(idx);
+    }
   }
   return transpose;
 }
 
-std::vector<int>
-avtopenpmdFileFormat::GetIndexOrder(std::vector<std::string> axisLabels) {
-  // Returns the index ordering (from slowest index to fastest)
-  // of data that has data order 'dataOrder' and axis labels 'axisLabels'
-  // The index returned for x is 0, y is 1, and z is 2.
-
-  // get index ordering from axisLabels
-  std::vector<int> indexOrder{};
-  for (std::string const &axisLabel : axisLabels) {
-    if (axisLabel == "x") {
-      indexOrder.push_back(0);
-    } else if (axisLabel == "y") {
-      indexOrder.push_back(1);
-    } else if (axisLabel == "z") {
-      indexOrder.push_back(2);
-    }
+std::map<std::string, size_t>
+GetExtentMap(std::vector<std::string> const &axisLayoutOrder,
+             std::vector<uint64_t> const &extents) {
+  // return std::map from axis label to extent size
+  std::map<std::string, size_t> extent_map{};
+  for (int i = 0; i < axisLayoutOrder.size(); ++i) {
+    extent_map[axisLayoutOrder[i]] = extents[i];
   }
-  return indexOrder;
+  return extent_map;
 }
 
-std::tuple<size_t, size_t, size_t>
-avtopenpmdFileFormat::GetIndexCoefficients(std::vector<int> const &indexOrder,
-                                           std::vector<uint64_t> const &ndims) {
-  // Returns the index coefficients A, B, C for a given index ordering
+std::vector<uint64_t>
+GetExtentsWithOrder(std::map<std::string, size_t> &extent_map,
+                    std::vector<std::string> const &axisLayoutOrder) {
+  // return extents in order
+  std::vector<uint64_t> extents(axisLayoutOrder.size());
+  for (int i = 0; i < axisLayoutOrder.size(); ++i) {
+    extents[i] = extent_map[axisLayoutOrder[i]];
+  }
+  return extents;
+}
+
+std::map<std::string, size_t>
+GetLayoutStride(std::vector<std::string> const &axisLayoutOrder,
+                std::map<std::string, size_t> &extents) {
+  // Returns the strides for a given layout ordering 'axisLayoutOrder'
 
   // compute coefficients
-  // EXAMPLE indexOrder: 0, 1, 2 == X, Y, Z (from slowest index to fastest)
+  // EXAMPLE axisLayoutOrder: 0, 1, 2 == X, Y, Z (from slowest index to fastest)
   // A = 1 * ndims[1] * ndims[2]
   // B = 1 * ndims[2]
   // C = 1;
-  // EXAMPLE indexOrder: 2, 1, 0 == Z, Y, X (from slowest index to fastest)
+  // EXAMPLE axisLayoutOrder: 2, 1, 0 == Z, Y, X (from slowest index to fastest)
   // A = 1;
   // B = 1 * ndims[0];
   // C = 1 * ndims[1] * ndims[0];
 
-  // EXAMPLE Data index order: 1 0 2 == Y, X, Z (slowest to fastest)
-  // A = 1 * ndims[2]
-  // B = 1 * ndims[0] * ndims[2]
-  // C = 1
-  // EXAMPLE Data index order: 0 2 1  == X, Z, Y (slowest to fastest)
-  // A = 1 * ndims[2] * ndims[1] = 201
-  // B = 1
-  // C = 1 * ndims[1] = 201
+  // TODO: Is the stride for input and output mixed up??
 
-  size_t A[3] = {1, 1, 1};
-  for (int ii = 0; ii < 3; ++ii) {
-    for (int jj = ii + 1; jj < 3; ++jj) {
-      A[indexOrder[ii]] *= ndims[indexOrder[jj]];
+// [openpmd-api-plugin] GetMesh() for iteration 255 and VisIt mesh rho_mesh
+// Mesh transpose: 1, 0, 2
+// gridExtent[0] = 51
+// gridSpacing[0] = 6e-07
+// gridOrigin[0] = -1.5e-05
+// gridExtent[1] = 1
+// gridSpacing[1] = 0
+// gridOrigin[1] = 0
+// gridExtent[2] = 201
+// gridSpacing[2] = 1e-07
+// gridOrigin[2] = 1.02e-05
+
+// [openpmd-api-plugin] Mesh is node-centered.
+// [openpmd-api-plugin] GetVar() for iteration 255 and var rho
+// Data extents: 51, 201, 
+// Data axis labels (slowest-to-fastest layout order): x z 
+// Output data extents: 201, 51, 
+// VTK axis labels (slowest-to-fastest layout order): z x 
+// p = 0
+// 	q = 1
+// 	stride[x] *= ndims[z]
+// p = 1
+// p = 0
+// 	q = 1
+// 	stride[z] *= ndims[x]
+// p = 1
+// Input layout stride (2D): 1 201
+// Output layout stride (2D): 51 1
+
+  std::map<std::string, size_t> stride{};
+  for (auto const &axis : axisLayoutOrder) {
+    stride[axis] = 1;
+  }
+
+  for (int p = 0; p < axisLayoutOrder.size(); ++p) {
+    debug5 << "p = " << p << "\n";
+    for (int q = p + 1; q < axisLayoutOrder.size(); ++q) {
+      debug5 << "\tq = " << q << "\n";
+      debug5 << "\tstride[" << axisLayoutOrder[p] << "] *= ndims["
+             << axisLayoutOrder[q] << "]\n";
+
+      stride[axisLayoutOrder[p]] *= extents[axisLayoutOrder[q]];
     }
   }
-  return {A[0], A[1], A[2]};
+
+  return stride;
 }

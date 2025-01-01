@@ -46,21 +46,38 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
 
   // read incomplete filepath string from file 'filename'
   std::string opmd_filestring;
-  std::string opmd_overrideAxisLabels;
+  std::string opmd_overrideMeshAxisLabels;
+  std::string opmd_overrideParticleAxisLabels;
+
   {
     std::ifstream file(filename);
+
     // get file string
     std::getline(file, opmd_filestring);
-    // if it exists, get overrideAxisLabels
-    std::getline(file, opmd_overrideAxisLabels);
-    if (opmd_overrideAxisLabels != "") {
-      doOverrideAxisOrder_ = true;
-      auto iss = std::istringstream{opmd_overrideAxisLabels};
+
+    // if it exists, get overrideMeshAxisLabels
+    std::getline(file, opmd_overrideMeshAxisLabels);
+    if (opmd_overrideMeshAxisLabels != "") {
+      doOverrideMeshAxisOrder_ = true;
+      auto iss = std::istringstream{opmd_overrideMeshAxisLabels};
       auto str = std::string{};
       while (iss >> str) {
-        overrideAxisLabels_.push_back(str);
+        overrideMeshAxisLabels_.push_back(str);
       }
     }
+
+    // if it exists, get overrideParticleAxisLabels
+    std::getline(file, opmd_overrideParticleAxisLabels);
+    if (opmd_overrideParticleAxisLabels != "") {
+      doOverrideParticleAxisOrder_ = true;
+      auto iss = std::istringstream{opmd_overrideParticleAxisLabels};
+      auto str = std::string{};
+      while (iss >> str) {
+        overrideParticleAxisLabels_.push_back(str);
+      }
+    }
+
+    // close file
     file.close();
   }
 
@@ -147,7 +164,7 @@ void avtopenpmdFileFormat::ReadFieldMetaData(avtDatabaseMetaData *md,
     avtMeshType mt = AVT_RECTILINEAR_MESH;
     int nblocks = 1; // <-- this must be 1 for MTSD
     int block_origin = 0;
-    int spatial_dimension = 3; // mesh.axisLabels().size();
+    int spatial_dimension = mesh.axisLabels().size(); // 3;
     int topological_dimension = mesh.axisLabels().size();
     double *extents = NULL;
 
@@ -285,12 +302,12 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
 
   // openPMD geometry
   const int ndims = mesh.axisLabels().size(); // topological dimension
-  const GeometryData geom = GetGeometryXYZ(mesh);
+  const GeometryData geom = GetGeometryXYZ(mesh, false);
   double gridUnitSI =
       mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
 
   // debugging
-  for (int idim = 0; idim < 3; ++idim) {
+  for (int idim = 0; idim < ndims; ++idim) {
     debug5 << "gridExtent[" << idim << "] = " << geom.extent[idim] << '\n';
     debug5 << "gridSpacing[" << idim << "] = " << geom.gridSpacing[idim]
            << '\n';
@@ -304,7 +321,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   int dims[3] = {1, 1, 1};       // number of cells + 1
   avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
-  for (int idim = 0; idim < 3; ++idim) {
+  for (int idim = 0; idim < ndims; ++idim) {
     // rescale code units to SI units
     origin[idim] = gridUnitSI * geom.gridOrigin[idim];
     spacing[idim] = gridUnitSI * geom.gridSpacing[idim];
@@ -329,7 +346,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   }
 
   // loop over real dimensions
-  for (int idim = 0; idim < 3; ++idim) {
+  for (int idim = 0; idim < ndims; ++idim) {
     coords[idim]->SetNumberOfTuples(dims[idim]);
     float *array = static_cast<float *>(coords[idim]->GetVoidPointer(0));
     // set rectilinear coordinates at nodes of grid
@@ -342,9 +359,11 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   rgrid->SetDimensions(dims);
   rgrid->SetXCoordinates(coords[0]);
   rgrid->SetYCoordinates(coords[1]);
-  rgrid->SetZCoordinates(coords[2]);
+  if (ndims == 3) {
+    rgrid->SetZCoordinates(coords[2]);
+  }
 
-  for (int idim = 0; idim < 3; ++idim) {
+  for (int idim = 0; idim < ndims; ++idim) {
     coords[idim]->Delete();
   }
 
@@ -480,11 +499,13 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
     double xp = unitSI_x * x.at(j) + unitSI_xoff * xoff.at(j);
     double yp = unitSI_y * y.at(j) + unitSI_yoff * yoff.at(j);
     double zp = unitSI_z * z.at(j) + unitSI_zoff * zoff.at(j);
-    pts->SetPoint(j, xp, yp, zp);
-#if 0
-    //  for example_3d dataset, particle coordinate labels appear to be wrong
-    pts->SetPoint(j, zp, yp, xp); // DEBUGGING ONLY!!!
-#endif
+
+    if (!doOverrideParticleAxisOrder_) {
+      pts->SetPoint(j, xp, yp, zp);
+    } else {
+      // re-order particle axes for debugging data layout issues
+      pts->SetPoint(j, zp, yp, xp); // DEBUGGING ONLY!!!
+    }
   }
 
   vtkCellArray *verts = vtkCellArray::New();
@@ -543,22 +564,23 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
   return 0;
 }
 
-
-GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
+GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh,
+                                                 bool insertMissingAxes) {
   // get dataOrder
   auto dataOrder = mesh.dataOrder();
 
   // get axis labels
   std::vector<std::string> axisLabels = mesh.axisLabels();
-  if (doOverrideAxisOrder_) {
+  if (doOverrideMeshAxisOrder_) {
     // for debugging
-    debug5 << "Overriding axis labels. As-written axis labels: ";
+    debug5 << "Overriding Mesh axis labels. As-written axis labels: ";
     for (auto label : axisLabels) {
       debug5 << label << " ";
     }
     debug5 << '\n';
 
-    axisLabels = overrideAxisLabels_; // must be the same size as original axisLabels!
+    axisLabels = overrideMeshAxisLabels_; // must be the same size as original
+                                          // axisLabels!
     debug5 << "\tNew axis labels: ";
     for (auto label : axisLabels) {
       debug5 << label << " ";
@@ -582,16 +604,18 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
     std::reverse(gridOrigin.begin(), gridOrigin.end());
   }
 
-  // add any missing axis labels at the *beginning* with extent 1
-  std::vector<std::string> canonicalAxes = {std::string("z"), std::string("y"),
-                                            std::string("x")};
-  for (auto const &axis : canonicalAxes) {
-    if (std::find(axisLabels.begin(), axisLabels.end(), axis) ==
-        axisLabels.end()) {
-      axisLabels.insert(axisLabels.begin(), axis);
-      extent.insert(extent.begin(), 1);
-      gridSpacing.insert(gridSpacing.begin(), 0);
-      gridOrigin.insert(gridOrigin.begin(), 0);
+  if (insertMissingAxes) {
+    // add any missing axis labels at the *beginning* with extent 1
+    std::vector<std::string> canonicalAxes = {
+        std::string("z"), std::string("y"), std::string("x")};
+    for (auto const &axis : canonicalAxes) {
+      if (std::find(axisLabels.begin(), axisLabels.end(), axis) ==
+          axisLabels.end()) {
+        axisLabels.insert(axisLabels.begin(), axis);
+        extent.insert(extent.begin(), 1);
+        gridSpacing.insert(gridSpacing.begin(), 0);
+        gridOrigin.insert(gridOrigin.begin(), 0);
+      }
     }
   }
 
@@ -603,15 +627,13 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh) {
   return geom;
 }
 
-GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh) {
-  GeometryData geom = GetGeometry3D(mesh);
+GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
+                                                  bool insertMissingAxes) {
+  GeometryData geom = GetGeometry3D(mesh, insertMissingAxes);
 
   // compute transposition of axisLabels -> {'x', 'y', 'z'}
   auto axisLabels = geom.axisLabels;
   auto transpose = GetAxisTranspose(axisLabels);
-
-  debug5 << "Mesh transpose: " << transpose[0] << ", " << transpose[1] << ", "
-         << transpose[2] << '\n';
 
   // transpose geometry data
   TransposeVector(geom.axisLabels, transpose);
@@ -621,8 +643,9 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh) {
 
   // verify we did it right
   assert(geom.axisLabels[0] == std::string("x"));
-  assert(geom.axisLabels[1] == std::string("y"));
-  assert(geom.axisLabels[2] == std::string("z"));
+  assert(geom.axisLabels[1] == std::string("z"));
+  //assert(geom.axisLabels[1] == std::string("y"));
+  //assert(geom.axisLabels[2] == std::string("z"));
 
   return geom;
 }
