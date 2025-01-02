@@ -1,3 +1,8 @@
 build/
 .cache/
 compile_commands.json
+*.h5
+*.bp
+*.session
+*.gui
+visitlog.py
