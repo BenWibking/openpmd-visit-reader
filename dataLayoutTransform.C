@@ -10,9 +10,13 @@
 #include "dataLayoutTransform.h"
 
 std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
-    std::vector<std::string> const &axisLabels) {
+    std::vector<std::string> const &axisLabelsSrc,
+    std::vector<std::string> const &axisLabelsDst) {
+  // compute indicies to transpose a vector from axisLabelsFrom -> axisLabelsTo
+#if 0
   const std::vector<std::string> cartesianAxes = {
       std::string("x"), std::string("y"), std::string("z")};
+#endif
 
   auto getIndexOf = [](std::string const &e,
                        std::vector<std::string> const &v) {
@@ -24,10 +28,10 @@ std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
     }
   };
 
-  // compute transposition that takes axisLabels to {'x', 'y', 'z'}
+  // compute transposition that takes axisLabelsSrc to axisLabelsDst
   std::vector<int> transpose{};
-  for (auto axis : cartesianAxes) {
-    auto idx = getIndexOf(axis, axisLabels);
+  for (auto axis : axisLabelsDst) {
+    auto idx = getIndexOf(axis, axisLabelsSrc);
     if (idx != -1L) {
       transpose.push_back(idx);
     }
@@ -74,34 +78,34 @@ GetLayoutStride(std::vector<std::string> const &axisLayoutOrder,
 
   // TODO: Is the stride for input and output mixed up??
 
-// [openpmd-api-plugin] GetMesh() for iteration 255 and VisIt mesh rho_mesh
-// Mesh transpose: 1, 0, 2
-// gridExtent[0] = 51
-// gridSpacing[0] = 6e-07
-// gridOrigin[0] = -1.5e-05
-// gridExtent[1] = 1
-// gridSpacing[1] = 0
-// gridOrigin[1] = 0
-// gridExtent[2] = 201
-// gridSpacing[2] = 1e-07
-// gridOrigin[2] = 1.02e-05
+  // [openpmd-api-plugin] GetMesh() for iteration 255 and VisIt mesh rho_mesh
+  // Mesh transpose: 1, 0, 2
+  // gridExtent[0] = 51
+  // gridSpacing[0] = 6e-07
+  // gridOrigin[0] = -1.5e-05
+  // gridExtent[1] = 1
+  // gridSpacing[1] = 0
+  // gridOrigin[1] = 0
+  // gridExtent[2] = 201
+  // gridSpacing[2] = 1e-07
+  // gridOrigin[2] = 1.02e-05
 
-// [openpmd-api-plugin] Mesh is node-centered.
-// [openpmd-api-plugin] GetVar() for iteration 255 and var rho
-// Data extents: 51, 201, 
-// Data axis labels (slowest-to-fastest layout order): x z 
-// Output data extents: 201, 51, 
-// VTK axis labels (slowest-to-fastest layout order): z x 
-// p = 0
-// 	q = 1
-// 	stride[x] *= ndims[z]
-// p = 1
-// p = 0
-// 	q = 1
-// 	stride[z] *= ndims[x]
-// p = 1
-// Input layout stride (2D): 1 201
-// Output layout stride (2D): 51 1
+  // [openpmd-api-plugin] Mesh is node-centered.
+  // [openpmd-api-plugin] GetVar() for iteration 255 and var rho
+  // Data extents: 51, 201,
+  // Data axis labels (slowest-to-fastest layout order): x z
+  // Output data extents: 201, 51,
+  // VTK axis labels (slowest-to-fastest layout order): z x
+  // p = 0
+  // 	q = 1
+  // 	stride[x] *= ndims[z]
+  // p = 1
+  // p = 0
+  // 	q = 1
+  // 	stride[z] *= ndims[x]
+  // p = 1
+  // Input layout stride (2D): 1 201
+  // Output layout stride (2D): 51 1
 
   std::map<std::string, size_t> stride{};
   for (auto const &axis : axisLayoutOrder) {

@@ -114,9 +114,9 @@ protected:
   GeometryData GetGeometryXYZ(openPMD::Mesh const &mesh,
                               bool insertMissingAxes = true);
 
-  std::vector<int> GetIndexOrder(std::vector<std::string> axisLabels);
-
-  std::vector<int> GetAxisTranspose(std::vector<std::string> const &axisLabels);
+  std::vector<int>
+  GetAxisTranspose(std::vector<std::string> const &axisLabelsSrc,
+                   std::vector<std::string> const &axisLabelsDst);
 
   template <typename T>
   void TransposeVector(std::vector<T> &vec_to_transpose,

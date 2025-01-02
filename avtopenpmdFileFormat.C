@@ -164,7 +164,7 @@ void avtopenpmdFileFormat::ReadFieldMetaData(avtDatabaseMetaData *md,
     avtMeshType mt = AVT_RECTILINEAR_MESH;
     int nblocks = 1; // <-- this must be 1 for MTSD
     int block_origin = 0;
-    int spatial_dimension = mesh.axisLabels().size(); // 3;
+    int spatial_dimension = 3;
     int topological_dimension = mesh.axisLabels().size();
     double *extents = NULL;
 
@@ -302,12 +302,12 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
 
   // openPMD geometry
   const int ndims = mesh.axisLabels().size(); // topological dimension
-  const GeometryData geom = GetGeometryXYZ(mesh, false);
+  const GeometryData geom = GetGeometryXYZ(mesh, true);
   double gridUnitSI =
       mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
 
   // debugging
-  for (int idim = 0; idim < ndims; ++idim) {
+  for (int idim = 0; idim < 3; ++idim) {
     debug5 << "gridExtent[" << idim << "] = " << geom.extent[idim] << '\n';
     debug5 << "gridSpacing[" << idim << "] = " << geom.gridSpacing[idim]
            << '\n';
@@ -321,7 +321,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   int dims[3] = {1, 1, 1};       // number of cells + 1
   avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
-  for (int idim = 0; idim < ndims; ++idim) {
+  for (int idim = 0; idim < 3; ++idim) {
     // rescale code units to SI units
     origin[idim] = gridUnitSI * geom.gridOrigin[idim];
     spacing[idim] = gridUnitSI * geom.gridSpacing[idim];
@@ -346,7 +346,7 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   }
 
   // loop over real dimensions
-  for (int idim = 0; idim < ndims; ++idim) {
+  for (int idim = 0; idim < 3; ++idim) {
     coords[idim]->SetNumberOfTuples(dims[idim]);
     float *array = static_cast<float *>(coords[idim]->GetVoidPointer(0));
     // set rectilinear coordinates at nodes of grid
@@ -359,11 +359,9 @@ vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
   rgrid->SetDimensions(dims);
   rgrid->SetXCoordinates(coords[0]);
   rgrid->SetYCoordinates(coords[1]);
-  if (ndims == 3) {
-    rgrid->SetZCoordinates(coords[2]);
-  }
+  rgrid->SetZCoordinates(coords[2]);
 
-  for (int idim = 0; idim < ndims; ++idim) {
+  for (int idim = 0; idim < 3; ++idim) {
     coords[idim]->Delete();
   }
 
@@ -493,6 +491,13 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
   pd->SetPoints(pts);
   pts->Delete();
 
+  // get transpose
+  std::vector<int> particleCompTranspose;
+  if (doOverrideParticleAxisOrder_) {
+    particleCompTranspose =
+        GetAxisTranspose({"x", "y", "z"}, overrideParticleAxisLabels_);
+  }
+
   for (int j = 0; j < x.size(); j++) {
     // rescale code units to SI units
     // dimensions could be extremely small or large, so compute double
@@ -504,7 +509,9 @@ avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
       pts->SetPoint(j, xp, yp, zp);
     } else {
       // re-order particle axes for debugging data layout issues
-      pts->SetPoint(j, zp, yp, xp); // DEBUGGING ONLY!!!
+      std::vector<double> p{xp, yp, zp};
+      TransposeVector(p, particleCompTranspose);
+      pts->SetPoint(j, p[0], p[1], p[2]);
     }
   }
 
@@ -633,7 +640,7 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
 
   // compute transposition of axisLabels -> {'x', 'y', 'z'}
   auto axisLabels = geom.axisLabels;
-  auto transpose = GetAxisTranspose(axisLabels);
+  auto transpose = GetAxisTranspose(axisLabels, {"x", "y", "z"});
 
   // transpose geometry data
   TransposeVector(geom.axisLabels, transpose);
@@ -643,9 +650,8 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
 
   // verify we did it right
   assert(geom.axisLabels[0] == std::string("x"));
-  assert(geom.axisLabels[1] == std::string("z"));
-  //assert(geom.axisLabels[1] == std::string("y"));
-  //assert(geom.axisLabels[2] == std::string("z"));
+  assert(geom.axisLabels[1] == std::string("y"));
+  assert(geom.axisLabels[2] == std::string("z"));
 
   return geom;
 }
@@ -705,8 +711,10 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     // (rcomp.unitSI() must be read *after* flush!)
     ScaleVarData<double>(xyz_ptr, nelem, rcomp.unitSI());
 
+#if 0
     // transpose array if needed
     TransposeArray(xyz_ptr, mesh, rcomp);
+#endif
     return xyz_double;
 
   } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
@@ -724,10 +732,11 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
     // (rcomp.unitSI() must be read *after* flush!)
     ScaleVarData<float>(xyz_ptr, nelem, rcomp.unitSI());
 
+#if 0
     // transpose array if needed
     TransposeArray(xyz_ptr, mesh, rcomp);
+#endif
     return xyz_float;
-
   } else {
     debug5 << "[openpmd-api-plugin] "
            << "Unknown openPMD Datatype: " << rcomp.getDatatype() << "\n";
