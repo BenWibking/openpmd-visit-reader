@@ -13,10 +13,6 @@ std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
     std::vector<std::string> const &axisLabelsSrc,
     std::vector<std::string> const &axisLabelsDst) {
   // compute indicies to transpose a vector from axisLabelsFrom -> axisLabelsTo
-#if 0
-  const std::vector<std::string> cartesianAxes = {
-      std::string("x"), std::string("y"), std::string("z")};
-#endif
 
   auto getIndexOf = [](std::string const &e,
                        std::vector<std::string> const &v) {
