@@ -11,6 +11,9 @@ Supported:
 
 Buggy:
 * Data layout transformation
+  * Temporary workaround:
+    * Override mesh axis labels: https://github.com/BenWibking/openpmd-visit-reader/blob/3c8e5dcfbfb1169ab21d6ee9c47970ee6a5e71a5/example_data/hdf5_2d.pmd#L2
+    * Override particle axis labels: https://github.com/BenWibking/openpmd-visit-reader/blob/3c8e5dcfbfb1169ab21d6ee9c47970ee6a5e71a5/example_data/hdf5_2d.pmd#L3
 
 Currently unsupported:
 * Particle data (other than positions)
