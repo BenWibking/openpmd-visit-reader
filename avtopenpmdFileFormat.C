@@ -28,6 +28,7 @@
 #include <InvalidVariableException.h>
 
 #include "avtopenpmdFileFormat.h"
+#include "dataLayoutTransform.h" // NOLINT(unused-includes)
 
 // ****************************************************************************
 //  Method: avtopenpmdFileFormat constructor

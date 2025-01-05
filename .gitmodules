@@ -4,3 +4,6 @@
 [submodule "extern/mdspan"]
 	path = extern/mdspan
 	url = https://github.com/kokkos/mdspan.git
+[submodule "extern/openPMD-example-datasets"]
+	path = extern/openPMD-example-datasets
+	url = https://github.com/openPMD/openPMD-example-datasets.git
