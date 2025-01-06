@@ -1,4 +1,4 @@
-# openpmd-visit-reader
+# [WIP] openpmd-visit-reader
 
 This is a serial database plugin for VisIt that reads files using the OpenPMD-api.
 
