@@ -33,7 +33,20 @@ First, make sure all of the submodules are up to date:
 git submodule update --init
 ```
 
-Then run:
+Edit this line to point to your home directory:
+https://github.com/BenWibking/openpmd-visit-reader/blob/856c967442b6b903f3ddac2fc49963b40f547169/CMakeLists.txt#L3
+
+Edit this line to point to your VisIt installation:
+https://github.com/BenWibking/openpmd-visit-reader/blob/856c967442b6b903f3ddac2fc49963b40f547169/CMakeLists.txt#L4
+
+Copy `VisItLibraryDependencies.cmake` from your VisIt installation to the root of the repository.
+
+(macOS only:) Run:
+```
+./fix_VisItLibraryDependencies_macos.sh`
+```
+
+Finally, build with:
 ```
 mkdir build && cd build
 cmake .. -GNinja
