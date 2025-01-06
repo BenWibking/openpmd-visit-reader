@@ -28,40 +28,40 @@ Unplanned:
 
 ## Building
 
-First, make sure all of the submodules are up to date:
-```
-git submodule update --init
-```
+1. First, make sure all of the submodules are up to date:
+   ```
+   git submodule update --init
+   ```
 
-Edit this line to point to your home directory:
+2. Edit this line to point to your home directory:
 https://github.com/BenWibking/openpmd-visit-reader/blob/856c967442b6b903f3ddac2fc49963b40f547169/CMakeLists.txt#L3
 
-Edit this line to point to your VisIt installation:
+3. Edit this line to point to your VisIt installation:
 https://github.com/BenWibking/openpmd-visit-reader/blob/856c967442b6b903f3ddac2fc49963b40f547169/CMakeLists.txt#L4
 
-Copy `VisItLibraryDependencies.cmake` from your VisIt installation to the root of the repository.
+4. Copy `VisItLibraryDependencies.cmake` from your VisIt installation to the root of the repository.
 
-(macOS only:) Run:
-```
-./fix_VisItLibraryDependencies_macos.sh`
-```
+5. *(macOS only)* Run:
+   ```
+   ./fix_VisItLibraryDependencies_macos.sh
+   ```
 
-Finally, build with:
-```
-mkdir build && cd build
-cmake .. -GNinja
-ninja
-```
-The plugin should be installed to your `~/.visit` directory, where VisIt should detect and load it automatically. After recompiling the plugin, you may have to restart VisIt in order to use the new version of the plugin.
+6. Finally, build with:
+   ```
+   mkdir build && cd build
+   cmake .. -GNinja
+   ninja
+   ```
+   The plugin should be installed to your `~/.visit` directory, where VisIt should detect and load it automatically. After recompiling the plugin, you may have to restart VisIt in order to use the new version of the plugin.
 
 ## Testing
 
-First, extract the example data using the provided script:
-```
-cd example_data
-./extract_example_data.sh
-```
+1. Extract the example data using the provided script:
+   ```
+   cd example_data
+   ./extract_example_data.sh
+   ```
 
-Then, load any of the `*.pmd` files in the `example_data/` directory in VisIt (clicking `Open` in the main window). This file extension is associated with OpenPMD files, following the [convention](https://openpmd-api.readthedocs.io/en/latest/analysis/paraview.html#openpmd) used for the Paraview reader plugin.
+2. Load any of the `*.pmd` files in the `example_data/` directory in VisIt (clicking `Open` in the main window). This file extension is associated with OpenPMD files, following the [convention](https://openpmd-api.readthedocs.io/en/latest/analysis/paraview.html#openpmd) used for the Paraview reader plugin.
 
-Note that as an extension specific to this plugin, lines 2 and 3 of the `*.pmd` file can be used to override the as-written axis labels for mesh and particle data. This is used to avoid data layout transforms, which do not currently work correctly.
+   As an extension specific to this plugin, lines 2 and 3 of the `*.pmd` file can be used to override the as-written axis labels for mesh and particle data. This is used to avoid data layout transforms, which do not currently work correctly.
