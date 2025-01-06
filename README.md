@@ -25,3 +25,24 @@ Unplanned:
 * non-Cartesian geometry
 * Face-centered variables
 * Edge-centered variables
+
+## Building
+
+First, make sure all of the submodules are up to date:
+```
+git submodule update --init
+```
+
+Then run:
+```
+mkdir build && cd build
+cmake .. -GNinja
+ninja
+```
+The plugin should be installed to your `~/.visit` directory, where VisIt should detect and load it automatically.
+
+## Testing
+
+Load any of the `*.pmd` files in the `example_data/` directory in VisIt (clicking `Open` in the main window). This file extension is associated with OpenPMD files, following the [convention](https://openpmd-api.readthedocs.io/en/latest/analysis/paraview.html#openpmd) used for the Paraview reader plugin.
+
+Note that as an extension specific to this plugin, lines 2 and 3 of the `*.pmd` file can be used to override the as-written axis labels for mesh and particle data. This is used to avoid data layout transforms, which do not currently work correctly.
