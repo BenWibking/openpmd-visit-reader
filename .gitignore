@@ -1,3 +1,4 @@
+VisItLibraryDependencies.cmake
 build/
 .cache/
 compile_commands.json
