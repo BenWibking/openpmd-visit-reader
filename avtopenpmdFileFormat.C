@@ -7,17 +7,24 @@
 // ****************************************************************************
 
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <limits>
+#include <sstream>
+#include <cstring>
+#include <unordered_map>
 #include <stdexcept>
 #include <string>
 
 #include <avtDatabaseMetaData.h>
 #include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
-#include <vtkPolyData.h>
 #include <vtkRectilinearGrid.h>
 
 #include <openPMD/openPMD.hpp>
@@ -30,6 +37,99 @@
 #include "avtopenpmdFileFormat.h"
 #include "dataLayoutTransform.h" // NOLINT(unused-includes)
 
+namespace {
+
+inline void ComputeLogicalExtents(PatchInfo &patch) {
+  for (int axis = 0; axis < 3; ++axis) {
+    int lower = 0;
+    if (axis < static_cast<int>(patch.offset.size())) {
+      lower = static_cast<int>(patch.offset[axis]);
+    }
+
+    int cells = 1;
+    if (axis < static_cast<int>(patch.extent.size())) {
+      cells = static_cast<int>(patch.extent[axis]);
+    }
+    if (patch.centering == AVT_NODECENT && cells > 1) {
+      cells -= 1;
+    }
+    if (cells <= 0) {
+      cells = 1;
+    }
+
+    patch.logicalLower[axis] = lower;
+    patch.logicalUpper[axis] = lower + cells - 1;
+  }
+}
+
+inline void GetPhysicalBounds(const PatchInfo &patch, double minBounds[3],
+                              double maxBounds[3]) {
+  for (int axis = 0; axis < 3; ++axis) {
+    const double spacing = patch.spacing[axis];
+    const double origin = patch.origin[axis];
+    const int cells = patch.logicalUpper[axis] - patch.logicalLower[axis] + 1;
+    if (spacing == 0.0 || cells <= 0) {
+      minBounds[axis] = origin;
+      maxBounds[axis] = origin;
+    } else {
+      minBounds[axis] = origin;
+      maxBounds[axis] = origin + spacing * static_cast<double>(cells);
+    }
+  }
+}
+
+inline bool IsChildPatch(const PatchInfo &coarse, const PatchInfo &fine) {
+  double coarseMin[3] = {0.0, 0.0, 0.0};
+  double coarseMax[3] = {0.0, 0.0, 0.0};
+  double fineMin[3] = {0.0, 0.0, 0.0};
+  double fineMax[3] = {0.0, 0.0, 0.0};
+
+  GetPhysicalBounds(coarse, coarseMin, coarseMax);
+  GetPhysicalBounds(fine, fineMin, fineMax);
+
+  for (int axis = 0; axis < 3; ++axis) {
+    double tol = std::max({std::abs(coarse.spacing[axis]),
+                           std::abs(fine.spacing[axis]), 1.0}) * 1e-5;
+    if (fineMin[axis] < coarseMin[axis] - tol) {
+      return false;
+    }
+    if (fineMax[axis] > coarseMax[axis] + tol) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline std::vector<int> MakeRefinementVector(const std::array<int, 3> &ratio,
+                                             int dims) {
+  std::vector<int> result(std::max(1, dims), 1);
+  for (int axis = 0; axis < std::min(3, static_cast<int>(result.size()));
+       ++axis) {
+    result[axis] = ratio[axis];
+  }
+  return result;
+}
+
+inline std::vector<double> MakeCellSizeVector(const std::array<double, 3> &sizes,
+                                              int dims) {
+  std::vector<double> result(std::max(1, dims), 0.0);
+  for (int axis = 0; axis < std::min(3, static_cast<int>(result.size()));
+       ++axis) {
+    result[axis] = sizes[axis];
+  }
+  return result;
+}
+
+void DeleteStructuredDomainNesting(void *ptr) {
+  delete static_cast<avtStructuredDomainNesting *>(ptr);
+}
+
+void DeleteStructuredDomainBoundaries(void *ptr) {
+  delete static_cast<avtStructuredDomainBoundaries *>(ptr);
+}
+
+} // namespace
+
 // ****************************************************************************
 //  Method: avtopenpmdFileFormat constructor
 //
@@ -39,7 +139,7 @@
 // ****************************************************************************
 
 avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
-    : avtMTSDFileFormat(&filename, 1) {
+    : avtMTMDFileFormat(filename) {
   //
   // initialize an openPMD::series object
   //
@@ -99,7 +199,9 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   debug5 << "[openpmd-api-plugin] "
          << "This file contains " << series_.snapshots().size()
          << " iterations:";
-  iterationIndex_ = std::vector<unsigned long long>(series_.snapshots().size());
+  const size_t numTimesteps = series_.snapshots().size();
+  iterationIndex_ = std::vector<unsigned long long>(numTimesteps);
+  meshHierarchyCache_.resize(numTimesteps);
 
   // save map from timeState to iteration index
   // NOTE: openPMD's iteration index can be an arbitrary number, and can
@@ -144,116 +246,95 @@ int avtopenpmdFileFormat::GetNTimesteps(void) {
 
 void avtopenpmdFileFormat::FreeUpResources(void) {}
 
-void avtopenpmdFileFormat::ReadFieldMetaData(avtDatabaseMetaData *md,
-                                             openPMD::Iteration const &i) {
-  // NOTE: a good reference for understanding how to read OpenPMD files is:
-  // https://github.com/openPMD/openPMD-api/blob/dev/examples/6_dump_filebased_series.cpp
+void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
+                                               openPMD::Iteration const &i,
+                                               int timeState) {
+  struct LevelEntry {
+    int level;
+    std::string meshName;
+  };
 
-  // loop over openPMD::Mesh objects
-  debug5 << "[openpmd-api-plugin] "
-         << "This iteration contains " << i.meshes.size() << " meshes:\n";
+  std::unordered_map<std::string, std::vector<LevelEntry>> groupedMeshes;
 
   for (auto const &mesh_tuple : i.meshes) {
-    std::string openpmd_meshname = mesh_tuple.first;
-    std::string visit_meshname = openpmd_meshname + "_mesh";
+    const std::string openpmd_meshname = mesh_tuple.first;
+    auto [baseName, level] = ParseMeshLevel(openpmd_meshname);
+    groupedMeshes[baseName].push_back(LevelEntry{level, openpmd_meshname});
+  }
 
-    openPMD::Mesh mesh = mesh_tuple.second;
-    debug5 << "[openpmd-api-plugin] "
-           << "Reading mesh " << openpmd_meshname << "\n";
+  auto &hierarchyMap = meshHierarchyCache_.at(timeState);
+  hierarchyMap.clear();
 
-    avtMeshType mt = AVT_RECTILINEAR_MESH;
-    int nblocks = 1; // <-- this must be 1 for MTSD
-    int block_origin = 0;
-    int spatial_dimension = 3;
-    int topological_dimension = mesh.axisLabels().size();
-    double *extents = NULL;
+  for (auto &group : groupedMeshes) {
+    std::vector<std::pair<int, std::string>> levels;
+    levels.reserve(group.second.size());
+    for (auto const &entry : group.second) {
+      levels.emplace_back(entry.level, entry.meshName);
+    }
+    std::sort(levels.begin(), levels.end(),
+              [](auto const &lhs, auto const &rhs) {
+                return lhs.first < rhs.first;
+              });
 
-    meshMap_[visit_meshname] = std::tuple(DatasetType::Field, openpmd_meshname);
-    AddMeshToMetaData(md, visit_meshname, mt, extents, nblocks, block_origin,
-                      spatial_dimension, topological_dimension);
+    std::string visitMeshName = group.first + "_mesh";
+    MeshPatchHierarchy hierarchy =
+        CreateHierarchyForGroup(visitMeshName, levels, i);
 
-    // Each openPMD::Mesh may contain one or more openPMD::MeshRecordComponent
-    // A MeshRecordComponent is either i) a scalar, or ii) a vector component
+    hierarchy.metadataInitialized = true;
+    hierarchyMap[visitMeshName] = hierarchy;
+
+    meshMap_[visitMeshName] = std::tuple(DatasetType::Field, group.first);
+
+    avtMeshMetaData *meshMd = new avtMeshMetaData;
+    meshMd->name = visitMeshName;
+    meshMd->meshType = AVT_AMR_MESH;
+    meshMd->topologicalDimension = hierarchy.topologicalDim;
+    meshMd->spatialDimension = hierarchy.spatialDim;
+    meshMd->numBlocks = static_cast<int>(hierarchy.patches.size());
+    meshMd->blockTitle = "patches";
+    meshMd->blockPieceName = "patch";
+    meshMd->numGroups = hierarchy.numLevels;
+    meshMd->groupTitle = "levels";
+    meshMd->groupPieceName = "level";
+    meshMd->blockNames = hierarchy.blockNames;
+    md->Add(meshMd);
+    md->AddGroupInformation(hierarchy.numLevels,
+                            static_cast<int>(hierarchy.patches.size()),
+                            hierarchy.groupIds);
+
+    // Register scalar variables using the finest-level mesh as representative.
+    const std::string &representativeMeshName = levels.back().second;
+    openPMD::Mesh mesh = i.meshes.at(representativeMeshName);
 
     if (mesh.scalar()) {
-      // this openPMD::Mesh contains only one MeshRecordComponent when there
-      // is only one MeshRecordComponent, the name of the variable should be
-      // the same as the Mesh
-      std::string varname = openpmd_meshname;
-
-      // read the element centering
+      std::string varname = group.first;
       avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
-
-      // add var
       if (cent != AVT_UNKNOWN_CENT) {
-        debug5 << "[openpmd-api-plugin] "
-               << "Adding scalar variable " << varname << "\n";
-        std::string openpmd_compname = openPMD::MeshRecordComponent::SCALAR;
-        varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
-        AddScalarVarToMetaData(md, varname, visit_meshname, cent);
-      } else {
-        debug5 << "[openpmd-api-plugin] "
-               << "Var " << varname
-               << " is not cell/node-centered, skipping.\n";
+        varMap_[varname] = std::tuple(visitMeshName,
+                                       openPMD::MeshRecordComponent::SCALAR);
+        AddScalarVarToMetaData(md, varname, visitMeshName, cent);
       }
-    } else { // this openPMD::Mesh contains multiple 'MeshRecordComponent's
-      // It probably makes more sense to enroll multiple scalar variables, one
-      // per MeshRecordComponent, and let the user create a vector with
-      // expressions, if appropriate for the dataset.
-
+    } else {
       for (auto const &rc : mesh) {
-        // when there are multiple components, we create a hierarchical
-        // dataset
-        std::string openpmd_compname = rc.first;
-        std::string varname =
-            openpmd_meshname + std::string("/") + openpmd_compname;
-
-        // read the element centering
+        const std::string &componentName = rc.first;
+        std::string varname = group.first + "/" + componentName;
         avtCentering cent =
             GetCenteringType<openPMD::MeshRecordComponent>(rc.second);
-
-        // add var
         if (cent != AVT_UNKNOWN_CENT) {
-          debug5 << "[openpmd-api-plugin] "
-                 << "Adding scalar variable " << varname << "\n";
-          varMap_[varname] = std::tuple(openpmd_meshname, openpmd_compname);
-          AddScalarVarToMetaData(md, varname, visit_meshname, cent);
-        } else {
-          debug5 << "[openpmd-api-plugin] "
-                 << "Var " << varname
-                 << " is not cell/node-centered, skipping.\n";
+          varMap_[varname] = std::tuple(visitMeshName, componentName);
+          AddScalarVarToMetaData(md, varname, visitMeshName, cent);
         }
       }
     }
   }
-  debug5 << '\n' << '\n';
 }
 
-void avtopenpmdFileFormat::ReadParticleMetaData(avtDatabaseMetaData *md,
-                                                openPMD::Iteration const &i) {
-  // NOTE: a good reference for understanding how to read OpenPMD files is:
-  // https://github.com/openPMD/openPMD-api/blob/dev/examples/6_dump_filebased_series.cpp
-
-  // loop over openPMD::ParticleSpecies objects
+void avtopenpmdFileFormat::BuildParticleMetaData(avtDatabaseMetaData *md,
+                                                 openPMD::Iteration const &i) {
   debug5 << "[openpmd-api-plugin] "
-         << "This iteration contains " << i.particles.size()
-         << " particle species:\n";
-
-  for (auto const &particle_tuple : i.particles) {
-    std::string openpmd_speciesname = particle_tuple.first;
-    std::string visit_meshname = openpmd_speciesname + "_particles";
-
-    openPMD::ParticleSpecies species = particle_tuple.second;
-    debug5 << "[openpmd-api-plugin] "
-           << "Reading particle species " << openpmd_speciesname << "\n";
-
-    meshMap_[visit_meshname] =
-        std::tuple(DatasetType::ParticleSpecies, openpmd_speciesname);
-    avtMeshMetaData *mmd =
-        new avtMeshMetaData(visit_meshname, 1, 0, 0, 0, 3, 1, AVT_POINT_MESH);
-    mmd->nodesAreCritical = true;
-    md->Add(mmd);
-  }
+         << "Skipping particle metadata population (not yet supported).\n";
+  (void)md;
+  (void)i;
 }
 
 // ****************************************************************************
@@ -281,294 +362,430 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
   // open openPMD::Iteration 'iter'
   openPMD::Iteration iter = series_.snapshots()[iterIdx];
 
-  // read fields
-  ReadFieldMetaData(md, iter);
+  // populate field hierarchy metadata
+  BuildFieldHierarchy(md, iter, timeState);
 
-  // read particles
-  ReadParticleMetaData(md, iter);
+  // particles are currently unsupported in AMR mode
+  BuildParticleMetaData(md, iter);
 }
 
-vtkDataSet *avtopenpmdFileFormat::GetMeshField(openPMD::Iteration i,
-                                               std::string const &meshname) {
-  // open openPMD::Mesh 'meshname'
-  openPMD::Mesh mesh = i.meshes[meshname];
+void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
+                                             int domain, const char *type,
+                                             void *args, DestructorFunction &df) {
+  (void)domain;
+  (void)args;
 
-  // check that this is a cartesian mesh
-  if (mesh.geometry() != openPMD::Mesh::Geometry::cartesian) {
-    debug5 << "[openpmd-api-plugin] "
-           << "Unknown openPMD::Mesh geometry. Must be cartesian!\n";
-    return 0;
-  }
+  if (strcmp(type, AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION) == 0 ||
+      strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
+    if (var == nullptr) {
+      return NULL;
+    }
 
-  // openPMD geometry
-  const int ndims = mesh.axisLabels().size(); // topological dimension
-  const GeometryData geom = GetGeometryXYZ(mesh, true);
-  double gridUnitSI =
-      mesh.gridUnitSI(); // gridUnitSI scales the grid dimensions
+    if (timestep < 0 ||
+        timestep >= static_cast<int>(meshHierarchyCache_.size())) {
+      return NULL;
+    }
 
-  // debugging
-  for (int idim = 0; idim < 3; ++idim) {
-    debug5 << "gridExtent[" << idim << "] = " << geom.extent[idim] << '\n';
-    debug5 << "gridSpacing[" << idim << "] = " << geom.gridSpacing[idim]
-           << '\n';
-    debug5 << "gridOrigin[" << idim << "] = " << geom.gridOrigin[idim] << '\n';
-  }
-  debug5 << '\n';
+    const std::string meshName(var);
+    auto &hierarchyMap = meshHierarchyCache_[timestep];
+    auto it = hierarchyMap.find(meshName);
+    if (it == hierarchyMap.end()) {
+      return NULL;
+    }
 
-  // VTK geometry
-  double origin[3] = {0, 0, 0};  // position x0, y0, z0
-  double spacing[3] = {0, 0, 0}; // dx, dy, dz
-  int dims[3] = {1, 1, 1};       // number of cells + 1
-  avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
+    const MeshPatchHierarchy &hierarchy = it->second;
+    if (hierarchy.patches.empty()) {
+      return NULL;
+    }
 
-  for (int idim = 0; idim < 3; ++idim) {
-    // rescale code units to SI units
-    origin[idim] = gridUnitSI * geom.gridOrigin[idim];
-    spacing[idim] = gridUnitSI * geom.gridSpacing[idim];
+    if (strcmp(type, AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION) == 0) {
+      avtStructuredDomainNesting *nesting = BuildDomainNesting(hierarchy);
+      if (nesting == nullptr) {
+        return NULL;
+      }
+      df = DeleteStructuredDomainNesting;
+      return nesting;
+    }
 
-    if (cent == AVT_ZONECENT) {
-      dims[idim] = static_cast<int>(geom.extent[idim]) + 1;
-    } else if (cent == AVT_NODECENT) {
-      dims[idim] = static_cast<int>(geom.extent[idim]);
+    if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
+      avtStructuredDomainBoundaries *boundaries =
+          BuildDomainBoundaries(hierarchy);
+      if (boundaries == nullptr) {
+        return NULL;
+      }
+      df = DeleteStructuredDomainBoundaries;
+      return boundaries;
     }
   }
 
-  // TODO(benwibking): loop over chunks and create separate vtkUniformGrids
-  // for each chunk and assemble into an AMR mesh. This is necessary for files
-  // with sparse grids (also used for AMR datasets).
+  return avtMTMDFileFormat::GetAuxiliaryData(var, timestep, domain, type, args,
+                                             df);
+}
 
-  vtkFloatArray *coords[3];
-  for (int idim = 0; idim < 3; ++idim) {
-    coords[idim] = vtkFloatArray::New();
-    // initialize with null values
-    coords[idim]->SetNumberOfTuples(1);
-    coords[idim]->SetComponent(0, 0, 0.);
-  }
+std::pair<std::string, int>
+avtopenpmdFileFormat::ParseMeshLevel(std::string const &meshName) const {
+  int level = 0;
+  std::string base = meshName;
 
-  // loop over real dimensions
-  for (int idim = 0; idim < 3; ++idim) {
-    coords[idim]->SetNumberOfTuples(dims[idim]);
-    float *array = static_cast<float *>(coords[idim]->GetVoidPointer(0));
-    // set rectilinear coordinates at nodes of grid
-    for (int idx = 0; idx <= dims[idim]; ++idx) {
-      array[idx] = idx * spacing[idim] + origin[idim];
+  const std::string suffix = "_lvl";
+  std::size_t pos = meshName.rfind(suffix);
+  if (pos != std::string::npos) {
+    std::size_t digitsBegin = pos + suffix.size();
+    if (digitsBegin < meshName.size()) {
+      std::size_t digitsEnd = digitsBegin;
+      while (digitsEnd < meshName.size() && std::isdigit(meshName[digitsEnd])) {
+        ++digitsEnd;
+      }
+      if (digitsEnd > digitsBegin) {
+        level = std::stoi(meshName.substr(digitsBegin, digitsEnd - digitsBegin));
+        base = meshName.substr(0, pos);
+      }
     }
   }
 
-  vtkRectilinearGrid *rgrid = vtkRectilinearGrid::New();
-  rgrid->SetDimensions(dims);
-  rgrid->SetXCoordinates(coords[0]);
-  rgrid->SetYCoordinates(coords[1]);
-  rgrid->SetZCoordinates(coords[2]);
+  return {base, level};
+}
 
-  for (int idim = 0; idim < 3; ++idim) {
-    coords[idim]->Delete();
+MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
+    const std::string &visitMeshName,
+    const std::vector<std::pair<int, std::string>> &levels,
+    openPMD::Iteration const &iter) {
+  MeshPatchHierarchy hierarchy;
+
+  if (levels.empty()) {
+    return hierarchy;
   }
 
-  return rgrid;
+  std::vector<int> uniqueLevels;
+  uniqueLevels.reserve(levels.size());
+  int lastLevel = std::numeric_limits<int>::min();
+  for (auto const &levelPair : levels) {
+    if (uniqueLevels.empty() || levelPair.first != lastLevel) {
+      uniqueLevels.push_back(levelPair.first);
+      lastLevel = levelPair.first;
+    }
+  }
+
+  std::map<int, int> levelToGroupId;
+  for (size_t idx = 0; idx < uniqueLevels.size(); ++idx) {
+    levelToGroupId[uniqueLevels[idx]] = static_cast<int>(idx);
+  }
+
+  hierarchy.numLevels = static_cast<int>(uniqueLevels.size());
+  hierarchy.levelValues = uniqueLevels;
+  hierarchy.patchesPerLevel.assign(hierarchy.numLevels, {});
+  hierarchy.levelCellSizes.assign(hierarchy.numLevels,
+                                  std::array<double, 3>{0.0, 0.0, 0.0});
+
+  std::map<int, int> patchCountByLevel;
+
+  // Determine representative mesh to extract dimensional information.
+  const std::string &representativeMeshName = levels.front().second;
+  openPMD::Mesh representativeMesh = iter.meshes.at(representativeMeshName);
+  GeometryData repGeom = GetGeometryXYZ(representativeMesh, true);
+  int topoDim = 0;
+  for (auto extent : repGeom.extent) {
+    if (extent > 1) {
+      ++topoDim;
+    }
+  }
+  if (topoDim == 0) {
+    topoDim = 1;
+  }
+  hierarchy.topologicalDim = topoDim;
+  hierarchy.spatialDim = topoDim;
+
+  for (auto const &[levelValue, meshName] : levels) {
+    openPMD::Mesh mesh = iter.meshes.at(meshName);
+    GeometryData geom = GetGeometryXYZ(mesh, true);
+    double unitSI = mesh.gridUnitSI();
+    avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
+
+    // Determine a representative record component for chunk enumeration.
+    auto representativeComponent = mesh.scalar()
+                                      ? mesh[openPMD::MeshRecordComponent::SCALAR]
+                                      : mesh.begin()->second;
+
+    openPMD::ChunkTable chunks = representativeComponent.availableChunks();
+    if (chunks.empty()) {
+      openPMD::WrittenChunkInfo wholeDataset(
+          openPMD::Offset(representativeComponent.getExtent().size(), 0),
+          representativeComponent.getExtent());
+      chunks.push_back(wholeDataset);
+    }
+
+    std::array<double, 3> spacingPerAxis{0.0, 0.0, 0.0};
+    for (int axis = 0; axis < 3; ++axis) {
+      spacingPerAxis[axis] = unitSI * geom.gridSpacing[axis];
+    }
+    const int groupId = levelToGroupId[levelValue];
+    hierarchy.levelCellSizes[groupId] = spacingPerAxis;
+
+    for (auto const &chunk : chunks) {
+      PatchInfo patch;
+      patch.level = levelValue;
+      patch.meshName = meshName;
+      patch.offset = chunk.offset;
+      patch.extent = chunk.extent;
+      patch.centering = cent;
+
+      for (int axis = 0; axis < 3; ++axis) {
+        double spacing = spacingPerAxis[axis];
+        patch.spacing[axis] = spacing;
+
+        uint64_t offsetValue = 0;
+        if (axis < static_cast<int>(patch.offset.size())) {
+          offsetValue = patch.offset[axis];
+        }
+
+        double gridOrigin = unitSI * geom.gridOrigin[axis];
+        patch.origin[axis] =
+            gridOrigin + static_cast<double>(offsetValue) * spacing;
+      }
+
+      ComputeLogicalExtents(patch);
+
+      hierarchy.patches.push_back(patch);
+      const int patchIndex = static_cast<int>(hierarchy.patches.size()) - 1;
+
+      hierarchy.levelIdsPerPatch.push_back(groupId);
+      hierarchy.groupIds.push_back(groupId);
+      hierarchy.patchesPerLevel[groupId].push_back(patchIndex);
+
+      int &patchCounter = patchCountByLevel[levelValue];
+      std::ostringstream blockName;
+      blockName << "level" << levelValue << ",patch" << patchCounter++;
+      hierarchy.blockNames.push_back(blockName.str());
+    }
+  }
+
+  hierarchy.levelRefinementRatios.clear();
+  if (hierarchy.numLevels > 1) {
+    for (int idx = 1; idx < hierarchy.numLevels; ++idx) {
+      std::array<int, 3> ratio{1, 1, 1};
+      const auto &coarseSpacing = hierarchy.levelCellSizes[idx - 1];
+      const auto &fineSpacing = hierarchy.levelCellSizes[idx];
+      for (int axis = 0; axis < 3; ++axis) {
+        if (fineSpacing[axis] > 0.0 && coarseSpacing[axis] > 0.0) {
+          int r = static_cast<int>(std::round(coarseSpacing[axis] /
+                                              fineSpacing[axis]));
+          ratio[axis] = std::max(1, r);
+        }
+      }
+      hierarchy.levelRefinementRatios.push_back(ratio);
+    }
+  }
+
+  debug5 << "[openpmd-api-plugin] Registered AMR mesh " << visitMeshName
+         << " with " << hierarchy.patches.size() << " patches across "
+         << hierarchy.numLevels << " levels.\n";
+
+  return hierarchy;
 }
 
 vtkDataSet *
-avtopenpmdFileFormat::GetMeshParticles(openPMD::Iteration i,
-                                       std::string const &meshname) {
-  // open openPMD::ParticleSpecies 'meshname'
-  openPMD::ParticleSpecies species = i.particles[meshname];
+avtopenpmdFileFormat::CreateRectilinearPatch(const PatchInfo &patch) const {
+  vtkFloatArray *coords[3];
+  int dimensions[3];
 
-  // read particle positions and particle offsets, and their units
-
-  // NOTE: particle position/offsets can by any of: float, double, int32,
-  // uint32, int64, or uint64! (offsets are more likely to be integer types)
-
-  // TODO(benwibking): use std::visit to handle all of these
-
-  std::vector<double> x;
-  std::vector<double> y;
-  std::vector<double> z;
-  double unitSI_x{1};
-  double unitSI_y{1};
-  double unitSI_z{1};
-
-  std::vector<double> xoff;
-  std::vector<double> yoff;
-  std::vector<double> zoff;
-  double unitSI_xoff{1};
-  double unitSI_yoff{1};
-  double unitSI_zoff{1};
-
-  auto array_iter = {std::tuple("x", std::ref(x), std::ref(unitSI_x),
-                                std::ref(xoff), std::ref(unitSI_xoff)),
-                     std::tuple("y", std::ref(y), std::ref(unitSI_y),
-                                std::ref(yoff), std::ref(unitSI_yoff)),
-                     std::tuple("z", std::ref(z), std::ref(unitSI_z),
-                                std::ref(zoff), std::ref(unitSI_zoff))};
-
-  for (auto [comp, pos, pos_unit, offset, offset_unit] : array_iter) {
-    // queue reading positions
-    {
-      std::string full_recordname = "position/" + std::string(comp);
-      try {
-        openPMD::RecordComponent rc = species["position"][comp];
-        std::vector<uint64_t> extent = rc.getExtent();
-        assert(extent.size() == 1);
-        pos.get().resize(extent[0]);
-        rc.loadChunkRaw(pos.get().data(), {0U}, {-1U});
-        debug5 << "Reading " << full_recordname << " with extent " << extent[0]
-               << ".\n";
-      } catch (std::out_of_range) {
-        debug5 << "[openpmd-api-plugin] " << full_recordname
-               << " does not exist!\n";
-      }
+  for (int axis = 0; axis < 3; ++axis) {
+    const uint64_t cells =
+        axis < static_cast<int>(patch.extent.size()) ? patch.extent[axis] : 1;
+    int nodes = static_cast<int>(cells);
+    if (patch.centering == AVT_ZONECENT) {
+      nodes = static_cast<int>(cells + 1);
     }
-    // queue reading offsets
-    {
-      std::string full_recordname = "positionOffset/" + std::string(comp);
-      try {
-        openPMD::RecordComponent rc_offset = species["positionOffset"][comp];
-        std::vector<uint64_t> extent = rc_offset.getExtent();
-        assert(extent.size() == 1);
-        offset.get().resize(extent[0]);
-        rc_offset.loadChunkRaw(offset.get().data(), {0U}, {-1U});
-        debug5 << "Reading " << full_recordname << " with extent " << extent[0]
-               << ".\n";
-      } catch (std::out_of_range) {
-        debug5 << "[openpmd-api-plugin] " << full_recordname
-               << " does not exist!\n";
-      }
+    if (nodes <= 0) {
+      nodes = 1;
+    }
+    dimensions[axis] = nodes;
+
+    coords[axis] = vtkFloatArray::New();
+    coords[axis]->SetNumberOfTuples(nodes);
+    float *array = static_cast<float *>(coords[axis]->GetVoidPointer(0));
+    for (int idx = 0; idx < nodes; ++idx) {
+      array[idx] = static_cast<float>(patch.origin[axis] +
+                                      static_cast<double>(idx) *
+                                          patch.spacing[axis]);
     }
   }
 
-  series_.flush(); // flush() actually reads the data (and unitSI!)
+  vtkRectilinearGrid *grid = vtkRectilinearGrid::New();
+  grid->SetDimensions(dimensions);
+  grid->SetXCoordinates(coords[0]);
+  grid->SetYCoordinates(coords[1]);
+  grid->SetZCoordinates(coords[2]);
 
-  for (auto [comp, pos, pos_unit, offset, offset_unit] : array_iter) {
-    // read positions unitSI
-    {
-      openPMD::RecordComponent rc = species["position"][comp];
-      pos_unit.get() = rc.unitSI();
-      debug5 << "unitSI_" << comp << " = " << pos_unit.get() << '\n';
-    }
-    // read offsets unitSI
-    {
-      openPMD::RecordComponent rc_offset = species["positionOffset"][comp];
-      offset_unit.get() = rc_offset.unitSI();
-      debug5 << "unitSI_" << comp << "off = " << offset_unit.get() << '\n';
-    }
+  for (int axis = 0; axis < 3; ++axis) {
+    coords[axis]->Delete();
   }
 
-  // check that data is sane
-  auto all_equal = [](auto v1, auto v2, auto v3) constexpr -> bool {
-    return (v1 == v2) && (v2 == v3);
-  };
-
-  if (!all_equal(x.size(), y.size(), z.size())) {
-    debug5 << "[openpmd-api-plugin] x.size() == " << x.size() << '\n';
-    debug5 << "[openpmd-api-plugin] y.size() == " << y.size() << '\n';
-    debug5 << "[openpmd-api-plugin] z.size() == " << z.size() << '\n';
-    debug5 << "[openpmd-api-plugin] Particle position data is not consistent! "
-              "Can't read it.\n";
-    return 0;
-  }
-
-  if (!all_equal(xoff.size(), yoff.size(), zoff.size())) {
-    debug5 << "[openpmd-api-plugin] xoff.size() == " << xoff.size() << '\n';
-    debug5 << "[openpmd-api-plugin] yoff.size() == " << yoff.size() << '\n';
-    debug5 << "[openpmd-api-plugin] zoff.size() == " << zoff.size() << '\n';
-    debug5 << "[openpmd-api-plugin] Particle positionOffset data is not "
-              "consistent! Can't read it.\n";
-    return 0;
-  }
-
-  if (x.size() != xoff.size()) {
-    debug5 << "[openpmd-api-plugin] Particles have size " << x.size()
-           << "but offsets have size " << xoff.size()
-           << ". Can't read particles!\n";
-    return 0;
-  }
-
-  vtkPolyData *pd = vtkPolyData::New();
-  vtkPoints *pts = vtkPoints::New();
-  debug5 << "Creating vtkPoints of size = " << x.size() << '\n';
-  pts->SetNumberOfPoints(x.size());
-  pd->SetPoints(pts);
-  pts->Delete();
-
-  // get transpose
-  std::vector<int> particleCompTranspose;
-  if (doOverrideParticleAxisOrder_) {
-    particleCompTranspose =
-        GetAxisTranspose({"x", "y", "z"}, overrideParticleAxisLabels_);
-  }
-
-  for (int j = 0; j < x.size(); j++) {
-    // rescale code units to SI units
-    // dimensions could be extremely small or large, so compute double
-    double xp = unitSI_x * x.at(j) + unitSI_xoff * xoff.at(j);
-    double yp = unitSI_y * y.at(j) + unitSI_yoff * yoff.at(j);
-    double zp = unitSI_z * z.at(j) + unitSI_zoff * zoff.at(j);
-
-    if (!doOverrideParticleAxisOrder_) {
-      pts->SetPoint(j, xp, yp, zp);
-    } else {
-      // re-order particle axes for debugging data layout issues
-      std::vector<double> p{xp, yp, zp};
-      TransposeVector(p, particleCompTranspose);
-      pts->SetPoint(j, p[0], p[1], p[2]);
-    }
-  }
-
-  vtkCellArray *verts = vtkCellArray::New();
-  pd->SetVerts(verts);
-  verts->Delete();
-
-  for (int k = 0; k < x.size(); k++) {
-    verts->InsertNextCell(1);
-    verts->InsertCellPoint(k);
-  }
-
-  return pd;
+  return grid;
 }
 
-// ****************************************************************************
-//  Method: avtopenpmdFileFormat::GetMesh
-//
-//  Purpose:
-//      Gets the mesh associated with this file.  The mesh is returned as a
-//      derived type of vtkDataSet (ie vtkRectilinearGrid, vtkStructuredGrid,
-//      vtkUnstructuredGrid, etc).
-//
-//  Arguments:
-//      timestate   The index of the timestate.  If GetNTimesteps returned
-//                  'N' time steps, this is guaranteed to be between 0 and
-//                  N-1.
-//      meshname    The name of the mesh of interest.  This can be ignored if
-//                  there is only one mesh.
-//
-//  Programmer: benwibking -- generated by xml2avt
-//  Creation:   Fri Dec 6 17:16:49 PST 2024
-//
-// ****************************************************************************
-
-vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState,
-                                          const char *visit_meshname) {
-  // get actual iteration index
-  unsigned long long iter = iterationIndex_.at(timeState);
-
-  debug5 << "[openpmd-api-plugin] "
-         << "GetMesh() for iteration " << iter << " and VisIt mesh "
-         << visit_meshname << "\n";
-
-  // open openPMD::Iteration 'iter'
-  openPMD::Iteration i = series_.snapshots()[iter];
-
-  // get actual meshname
-  auto [dataset_type, meshname] = meshMap_[visit_meshname];
-
-  if (dataset_type == DatasetType::Field) {
-    return GetMeshField(i, meshname);
-  } else if (dataset_type == DatasetType::ParticleSpecies) {
-    return GetMeshParticles(i, meshname);
+avtStructuredDomainNesting *
+avtopenpmdFileFormat::BuildDomainNesting(
+    const MeshPatchHierarchy &hierarchy) const {
+  if (hierarchy.patches.empty() || hierarchy.numLevels == 0) {
+    return nullptr;
   }
 
-  return 0;
+  auto *nesting = new avtStructuredDomainNesting(
+      static_cast<int>(hierarchy.patches.size()), hierarchy.numLevels);
+
+  const int dims = std::max(1, hierarchy.spatialDim);
+  nesting->SetNumDimensions(dims);
+
+  nesting->SetLevelRefinementRatios(0, MakeRefinementVector({1, 1, 1}, dims));
+  for (int level = 1; level < hierarchy.numLevels; ++level) {
+    std::array<int, 3> ratio{1, 1, 1};
+    if (level - 1 < static_cast<int>(hierarchy.levelRefinementRatios.size())) {
+      ratio = hierarchy.levelRefinementRatios[level - 1];
+    }
+    nesting->SetLevelRefinementRatios(level, MakeRefinementVector(ratio, dims));
+  }
+
+  for (int level = 0; level < hierarchy.numLevels; ++level) {
+    std::array<double, 3> sizes{0.0, 0.0, 0.0};
+    if (level < static_cast<int>(hierarchy.levelCellSizes.size())) {
+      sizes = hierarchy.levelCellSizes[level];
+    }
+    nesting->SetLevelCellSizes(level, MakeCellSizeVector(sizes, dims));
+  }
+
+  for (size_t patchIdx = 0; patchIdx < hierarchy.patches.size(); ++patchIdx) {
+    const PatchInfo &patch = hierarchy.patches[patchIdx];
+    const int levelIndex = hierarchy.levelIdsPerPatch[patchIdx];
+
+    std::vector<int> children;
+    if (levelIndex + 1 < hierarchy.numLevels) {
+      const auto &candidateChildren =
+          hierarchy.patchesPerLevel[levelIndex + 1];
+      for (int childIdx : candidateChildren) {
+        if (IsChildPatch(patch, hierarchy.patches[childIdx])) {
+          children.push_back(childIdx);
+        }
+      }
+    }
+
+    std::vector<int> logicalExtents(6, 0);
+    for (int axis = 0; axis < 3; ++axis) {
+      logicalExtents[axis] = patch.logicalLower[axis];
+      logicalExtents[axis + 3] = patch.logicalUpper[axis];
+    }
+
+    nesting->SetNestingForDomain(static_cast<int>(patchIdx), levelIndex,
+                                 children, logicalExtents);
+  }
+
+  return nesting;
+}
+
+avtStructuredDomainBoundaries *
+avtopenpmdFileFormat::BuildDomainBoundaries(
+    const MeshPatchHierarchy &hierarchy) const {
+  if (hierarchy.patches.empty()) {
+    return nullptr;
+  }
+
+  bool canComputeNeighbors = true;
+  auto *boundaries =
+      new avtRectilinearDomainBoundaries(canComputeNeighbors);
+  boundaries->SetNumDomains(static_cast<int>(hierarchy.patches.size()));
+
+  if (hierarchy.numLevels > 1) {
+    std::vector<int> refinement(hierarchy.numLevels - 1, 1);
+    for (int level = 1; level < hierarchy.numLevels; ++level) {
+      if (level - 1 < static_cast<int>(hierarchy.levelRefinementRatios.size())) {
+        refinement[level - 1] = hierarchy.levelRefinementRatios[level - 1][0];
+      }
+    }
+    boundaries->SetRefinementRatios(refinement);
+  }
+
+  for (size_t patchIdx = 0; patchIdx < hierarchy.patches.size(); ++patchIdx) {
+    const PatchInfo &patch = hierarchy.patches[patchIdx];
+    const int levelIndex = hierarchy.levelIdsPerPatch[patchIdx];
+
+    int extents[6] = {0, 1, 0, 1, 0, 1};
+    for (int axis = 0; axis < 3; ++axis) {
+      if (axis < hierarchy.spatialDim) {
+        extents[2 * axis] = patch.logicalLower[axis];
+        extents[2 * axis + 1] = patch.logicalUpper[axis] + 1;
+      }
+    }
+
+    boundaries->SetIndicesForAMRPatch(static_cast<int>(patchIdx), levelIndex,
+                                      extents);
+  }
+
+  boundaries->CalculateBoundaries();
+  return boundaries;
+}
+
+vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
+    openPMD::Iteration const &iteration, const PatchInfo &patch,
+    const std::string &component) const {
+    openPMD::Mesh mesh = iteration.meshes.at(patch.meshName);
+  openPMD::MeshRecordComponent rcomp = mesh[component];
+
+  uint64_t nelem = 1;
+  for (auto const &nx : patch.extent) {
+    nelem *= nx;
+  }
+
+  vtkDataArray *result = nullptr;
+
+  if (rcomp.getDatatype() == openPMD::Datatype::DOUBLE) {
+    vtkDoubleArray *data = vtkDoubleArray::New();
+    data->SetNumberOfComponents(1);
+    data->SetNumberOfTuples(nelem);
+    double *buffer = data->GetPointer(0);
+    rcomp.loadChunkRaw(buffer, patch.offset, patch.extent);
+    const_cast<openPMD::Series &>(series_).flush();
+    ScaleVarData<double>(buffer, nelem, rcomp.unitSI());
+    result = data;
+  } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
+    vtkFloatArray *data = vtkFloatArray::New();
+    data->SetNumberOfComponents(1);
+    data->SetNumberOfTuples(nelem);
+    float *buffer = data->GetPointer(0);
+    rcomp.loadChunkRaw(buffer, patch.offset, patch.extent);
+    const_cast<openPMD::Series &>(series_).flush();
+    ScaleVarData<float>(buffer, nelem, rcomp.unitSI());
+    result = data;
+  }
+
+  return result;
+}
+
+vtkDataArray *avtopenpmdFileFormat::LoadVectorPatchData(
+    openPMD::Iteration const &, const PatchInfo &,
+    const std::vector<std::string> &) const {
+  debug5 << "[openpmd-api-plugin] Vector variables are not yet supported.";
+  return nullptr;
+}
+
+vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
+                                          const char *visit_meshname) {
+
+  auto hierarchyMapIt = meshHierarchyCache_.at(timeState).find(visit_meshname);
+  if (hierarchyMapIt == meshHierarchyCache_.at(timeState).end()) {
+    EXCEPTION1(InvalidVariableException, visit_meshname);
+  }
+
+  const MeshPatchHierarchy &hierarchy = hierarchyMapIt->second;
+  if (domain < 0 || domain >= static_cast<int>(hierarchy.patches.size())) {
+    EXCEPTION1(InvalidVariableException, visit_meshname);
+  }
+
+  const PatchInfo &patch = hierarchy.patches.at(domain);
+  debug5 << "[openpmd-api-plugin] GetMesh domain=" << domain
+         << " level=" << patch.level << " using mesh " << patch.meshName
+         << "\n";
+
+  vtkDataSet *grid = CreateRectilinearPatch(patch);
+  return grid;
 }
 
 GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh,
@@ -674,76 +891,38 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
 //
 // ****************************************************************************
 
-vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
-  // get actual iteration index
+vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, int domain,
+                                           const char *varname) {
+  auto varIt = varMap_.find(varname);
+  if (varIt == varMap_.end()) {
+    EXCEPTION1(InvalidVariableException, varname);
+  }
+
+  const std::string &visitMeshName = std::get<0>(varIt->second);
+  const std::string &component = std::get<1>(varIt->second);
+
+  auto &hierarchyMap = meshHierarchyCache_.at(timeState);
+  auto meshIt = hierarchyMap.find(visitMeshName);
+  if (meshIt == hierarchyMap.end()) {
+    EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+  }
+
+  const MeshPatchHierarchy &hierarchy = meshIt->second;
+  if (domain < 0 || domain >= static_cast<int>(hierarchy.patches.size())) {
+    EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+  }
+
+  const PatchInfo &patch = hierarchy.patches.at(domain);
+
   unsigned long long iter = iterationIndex_.at(timeState);
+  openPMD::Iteration iteration = series_.snapshots()[iter];
 
-  // lookup openPMD mesh name and record component name from varname
-  auto [meshname, rcname] = varMap_[varname];
-
-  debug5 << "[openpmd-api-plugin] "
-         << "GetVar() for iteration " << iter << " and var " << varname
-         << std::endl;
-
-  // open openPMD::Iteration 'iter' and openPMD::Mesh 'mesh'
-  openPMD::Iteration i = series_.snapshots()[iter];
-  openPMD::Mesh mesh = i.meshes[meshname];
-  openPMD::MeshRecordComponent rcomp = mesh[rcname];
-
-  // get number of elements
-  uint64_t nelem = 1;
-  for (auto const &nx : rcomp.getExtent()) {
-    nelem *= nx;
+  vtkDataArray *data = LoadScalarPatchData(iteration, patch, component);
+  if (data == nullptr) {
+    EXCEPTION1(InvalidVariableException, varname);
   }
 
-  if (rcomp.getDatatype() == openPMD::Datatype::DOUBLE) {
-    // create VTK buffer
-    vtkDoubleArray *xyz_double = vtkDoubleArray::New();
-    xyz_double->SetNumberOfComponents(1);
-    xyz_double->SetNumberOfTuples(nelem);
-    double *xyz_ptr = xyz_double->GetPointer(0);
-
-    // set offset and extent are set to read the full array
-    rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
-    series_.flush(); // flush() actually reads the data
-
-    // rescale data to SI units
-    // (rcomp.unitSI() must be read *after* flush!)
-    ScaleVarData<double>(xyz_ptr, nelem, rcomp.unitSI());
-
-#if 0
-    // transpose array if needed
-    TransposeArray(xyz_ptr, mesh, rcomp);
-#endif
-    return xyz_double;
-
-  } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
-    // create VTK buffer
-    vtkFloatArray *xyz_float = vtkFloatArray::New();
-    xyz_float->SetNumberOfComponents(1);
-    xyz_float->SetNumberOfTuples(nelem);
-    float *xyz_ptr = xyz_float->GetPointer(0);
-
-    // set offset and extent are set to read the full array
-    rcomp.loadChunkRaw(xyz_ptr, {0U}, {-1U});
-    series_.flush(); // flush() actually reads the data
-
-    // rescale data to SI units
-    // (rcomp.unitSI() must be read *after* flush!)
-    ScaleVarData<float>(xyz_ptr, nelem, rcomp.unitSI());
-
-#if 0
-    // transpose array if needed
-    TransposeArray(xyz_ptr, mesh, rcomp);
-#endif
-    return xyz_float;
-  } else {
-    debug5 << "[openpmd-api-plugin] "
-           << "Unknown openPMD Datatype: " << rcomp.getDatatype() << "\n";
-    return 0;
-  }
-
-  return 0;
+  return data;
 }
 
 // ****************************************************************************
@@ -764,7 +943,7 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, const char *varname) {
 //
 // ****************************************************************************
 
-vtkDataArray *avtopenpmdFileFormat::GetVectorVar(int timestate,
+vtkDataArray *avtopenpmdFileFormat::GetVectorVar(int, int,
                                                  const char *varname) {
-  return 0;
+  EXCEPTION1(InvalidVariableException, varname);
 }

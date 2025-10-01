@@ -9,13 +9,19 @@
 #ifndef AVT_openpmd_FILE_FORMAT_H
 #define AVT_openpmd_FILE_FORMAT_H
 
+#include <array>
+#include <map>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <openPMD/openPMD.hpp>
 
 #include <DebugStream.h>
-#include <avtMTSDFileFormat.h>
+#include <avtMTMDFileFormat.h>
+#include <avtTypes.h>
+#include <avtStructuredDomainBoundaries.h>
+#include <avtStructuredDomainNesting.h>
 
 struct GeometryData {
   std::vector<std::string> axisLabels;
@@ -35,7 +41,34 @@ struct GeometryData {
 //
 // ****************************************************************************
 
-class avtopenpmdFileFormat : public avtMTSDFileFormat {
+struct PatchInfo {
+  int level{0};
+  openPMD::Offset offset{};
+  openPMD::Extent extent{};
+  std::string meshName;
+  double origin[3]{0.0, 0.0, 0.0};
+  double spacing[3]{0.0, 0.0, 0.0};
+  avtCentering centering{AVT_UNKNOWN_CENT};
+  int logicalLower[3]{0, 0, 0};
+  int logicalUpper[3]{0, 0, 0};
+};
+
+struct MeshPatchHierarchy {
+  std::vector<PatchInfo> patches;
+  int numLevels{0};
+  std::vector<std::array<int, 3>> levelRefinementRatios; // per level > 0
+  std::vector<int> levelIdsPerPatch;      // size == patches, values in [0, numLevels)
+  std::vector<int> groupIds;
+  std::vector<std::string> blockNames;
+  std::vector<int> levelValues;           // sorted unique level identifiers
+  std::vector<std::vector<int>> patchesPerLevel;
+  std::vector<std::array<double, 3>> levelCellSizes;
+  bool metadataInitialized{false};
+  int topologicalDim{0};
+  int spatialDim{0};
+};
+
+class avtopenpmdFileFormat : public avtMTMDFileFormat {
 public:
   avtopenpmdFileFormat(const char *);
   virtual ~avtopenpmdFileFormat() { ; }
@@ -62,9 +95,9 @@ public:
   virtual const char *GetType(void) { return "openpmd"; }
   virtual void FreeUpResources(void);
 
-  virtual vtkDataSet *GetMesh(int, const char *);
-  virtual vtkDataArray *GetVar(int, const char *);
-  virtual vtkDataArray *GetVectorVar(int, const char *);
+  virtual vtkDataSet *GetMesh(int, int, const char *);
+  virtual vtkDataArray *GetVar(int, int, const char *);
+  virtual vtkDataArray *GetVectorVar(int, int, const char *);
 
   enum class DatasetType { Field = 0, ParticleSpecies };
 
@@ -85,10 +118,11 @@ protected:
   openPMD::Series series_;
   std::vector<unsigned long long> iterationIndex_;
   std::unordered_map<std::string, std::tuple<std::string, std::string>>
-      varMap_; // from VisIt varname, get openPMD mesh name AND record component
-               // name
+      varMap_; // from VisIt varname, get VisIt mesh name and record component
   std::unordered_map<std::string, std::tuple<DatasetType, std::string>>
       meshMap_; // from VisIt mesh name, get openPMD mesh name AND DatasetType
+  std::vector<std::unordered_map<std::string, MeshPatchHierarchy>>
+      meshHierarchyCache_; // per timestep
 
   bool doOverrideMeshAxisOrder_{false};
   bool doOverrideParticleAxisOrder_{false};
@@ -96,15 +130,33 @@ protected:
   std::vector<std::string> overrideParticleAxisLabels_;
 
   virtual void PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
-  void ReadFieldMetaData(avtDatabaseMetaData *md, openPMD::Iteration const &i);
-  void ReadParticleMetaData(avtDatabaseMetaData *md,
-                            openPMD::Iteration const &i);
+  virtual void *GetAuxiliaryData(const char *var, int timestep, int domain,
+                                 const char *type, void *args,
+                                 DestructorFunction &) override;
+  void BuildFieldHierarchy(avtDatabaseMetaData *md, openPMD::Iteration const &i,
+                           int timeState);
+  void BuildParticleMetaData(avtDatabaseMetaData *md,
+                             openPMD::Iteration const &i);
+  std::pair<std::string, int> ParseMeshLevel(std::string const &meshName) const;
+  MeshPatchHierarchy CreateHierarchyForGroup(
+      const std::string &visitMeshName,
+      const std::vector<std::pair<int, std::string>> &levels,
+      openPMD::Iteration const &iter);
+  vtkDataSet *CreateRectilinearPatch(const PatchInfo &patch) const;
+  vtkDataArray *LoadScalarPatchData(openPMD::Iteration const &iteration,
+                                    const PatchInfo &patch,
+                                    const std::string &component) const;
+  vtkDataArray *LoadVectorPatchData(openPMD::Iteration const &iteration,
+                                    const PatchInfo &patch,
+                                    const std::vector<std::string> &components)
+      const;
+  avtStructuredDomainNesting *
+  BuildDomainNesting(const MeshPatchHierarchy &hierarchy) const;
+  avtStructuredDomainBoundaries *
+  BuildDomainBoundaries(const MeshPatchHierarchy &hierarchy) const;
 
-  vtkDataSet *GetMeshField(openPMD::Iteration i, std::string const &meshname);
-  vtkDataSet *GetMeshParticles(openPMD::Iteration i,
-                               std::string const &meshname);
-
-  template <typename T> void ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI);
+  template <typename T> static void ScaleVarData(T *xyz_ptr, size_t nelem,
+                                                 T unitSI);
 
   template <typename T> avtCentering GetCenteringType(T const &mesh);
 
