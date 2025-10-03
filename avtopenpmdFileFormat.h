@@ -14,6 +14,7 @@
 #include <cmath>
 #include <map>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -124,6 +125,9 @@ protected:
   std::vector<unsigned long long> iterationIndex_;
   std::unordered_map<std::string, std::tuple<std::string, std::string>>
       varMap_; // from VisIt varname, get VisIt mesh name and record component
+  std::unordered_map<std::string,
+                     std::tuple<std::string, std::vector<std::string>>>
+      vectorVarMap_; // from VisIt vector varname get mesh and component list
   std::unordered_map<std::string, std::tuple<DatasetType, std::string>>
       meshMap_; // from VisIt mesh name, get openPMD mesh name AND DatasetType
   std::vector<std::unordered_map<std::string, MeshPatchHierarchy>>

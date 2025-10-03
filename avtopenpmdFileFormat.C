@@ -673,23 +673,73 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
                << "' due to unsupported centering\n";
       }
     } else {
+      std::vector<std::pair<std::string, openPMD::MeshRecordComponent>>
+          components;
+      components.reserve(mesh.size());
       for (auto const &rc : mesh) {
-        const std::string &componentName = rc.first;
-        std::string varname = group.first + "/" + componentName;
-        avtCentering cent =
-            GetCenteringType<openPMD::MeshRecordComponent>(rc.second);
-        if (cent != AVT_UNKNOWN_CENT) {
-          varMap_[varname] = std::tuple(visitMeshName, componentName);
-          if (md != nullptr) {
-            AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+        components.emplace_back(rc.first, rc.second);
+      }
+
+      if (components.empty()) {
+        debug1 << "[openpmd-api-plugin] Mesh '" << group.first
+               << "' has no record components; skipping registration\n";
+      } else {
+        const size_t componentCount = components.size();
+        avtCentering vectorCentering = GetCenteringType<openPMD::Mesh>(mesh);
+        if (vectorCentering == AVT_UNKNOWN_CENT) {
+          vectorCentering =
+              GetCenteringType<openPMD::MeshRecordComponent>(components.front().second);
+        }
+
+        if (vectorCentering == AVT_UNKNOWN_CENT) {
+          debug1 << "[openpmd-api-plugin] Skipping vector var '" << group.first
+                 << "' due to unsupported centering\n";
+        } else if (componentCount ==
+                   static_cast<size_t>(hierarchy.spatialDim)) {
+          std::vector<std::string> componentNames;
+          componentNames.reserve(componentCount);
+          for (auto const &entry : components) {
+            componentNames.push_back(entry.first);
           }
-          debug2 << "[openpmd-api-plugin] Registered component var '"
-                 << varname << "' centering=" << CenteringToString(cent)
+
+          vectorVarMap_[group.first] =
+              std::make_tuple(visitMeshName, componentNames);
+          if (md != nullptr) {
+            AddVectorVarToMetaData(md, group.first, visitMeshName,
+                                   vectorCentering,
+                                   static_cast<int>(componentCount));
+          }
+          debug2 << "[openpmd-api-plugin] Registered vector var '"
+                 << group.first << "' components="
+                 << JoinStrings(componentNames)
+                 << " centering=" << CenteringToString(vectorCentering)
                  << " representativeMesh='" << representativeMeshName
                  << "'\n";
         } else {
-          debug1 << "[openpmd-api-plugin] Skipping component '" << varname
-                 << "' due to unsupported centering\n";
+          debug1 << "[openpmd-api-plugin] Mesh '" << group.first
+                 << "' component count " << componentCount
+                 << " does not match spatial dimension "
+                 << hierarchy.spatialDim << "; registering components only\n";
+        }
+
+        for (auto const &entry : components) {
+          const std::string &componentName = entry.first;
+          std::string varname = group.first + "/" + componentName;
+          avtCentering cent =
+              GetCenteringType<openPMD::MeshRecordComponent>(entry.second);
+          if (cent != AVT_UNKNOWN_CENT) {
+            varMap_[varname] = std::tuple(visitMeshName, componentName);
+            if (md != nullptr) {
+              AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+            }
+            debug2 << "[openpmd-api-plugin] Registered component var '"
+                   << varname << "' centering=" << CenteringToString(cent)
+                   << " representativeMesh='" << representativeMeshName
+                   << "'\n";
+          } else {
+            debug1 << "[openpmd-api-plugin] Skipping component '" << varname
+                   << "' due to unsupported centering\n";
+          }
         }
       }
     }
@@ -712,8 +762,9 @@ void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
 
   auto &hierarchyMap = meshHierarchyCache_.at(timeState);
   debug1 << "[openpmd-api-plugin] Field hierarchy complete. Registered "
-         << hierarchyMap.size() << " meshes and " << varMap_.size()
-         << " scalars\n";
+         << hierarchyMap.size() << " meshes, " << varMap_.size()
+         << " scalar components and " << vectorVarMap_.size()
+         << " vector variables\n";
 }
 
 void avtopenpmdFileFormat::BuildParticleMetaData(avtDatabaseMetaData *md,
@@ -1696,10 +1747,140 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
 }
 
 vtkDataArray *avtopenpmdFileFormat::LoadVectorPatchData(
-    openPMD::Iteration const &, const PatchInfo &,
-    const std::vector<std::string> &) const {
-  debug1 << "[openpmd-api-plugin] Vector variables are not supported\n";
-  return nullptr;
+    openPMD::Iteration const &iteration, const PatchInfo &patch,
+    const std::vector<std::string> &components) const {
+  debug1 << "[openpmd-api-plugin] LoadVectorPatchData mesh='" << patch.meshName
+         << "' components=" << JoinStrings(components) << "' offset="
+         << JoinContainer(patch.offset) << " extent="
+         << JoinContainer(patch.extent) << "\n";
+
+  if (components.empty()) {
+    debug1 << "[openpmd-api-plugin] LoadVectorPatchData invoked with no"
+           << " components; returning nullptr\n";
+    return nullptr;
+  }
+
+  auto meshIt = iteration.meshes.find(patch.meshName);
+  if (meshIt == iteration.meshes.end()) {
+    debug1 << "[openpmd-api-plugin] LoadVectorPatchData missing mesh '"
+           << patch.meshName << "'\n";
+    EXCEPTION1(InvalidVariableException, patch.meshName.c_str());
+  }
+
+  vtkDataArray *result = nullptr;
+  std::vector<vtkDataArray *> loadedComponents;
+  loadedComponents.reserve(components.size());
+
+  try {
+    for (auto const &componentName : components) {
+      vtkDataArray *componentData =
+          LoadScalarPatchData(iteration, patch, componentName);
+      if (componentData == nullptr) {
+        debug1 << "[openpmd-api-plugin] LoadVectorPatchData failed to load"
+               << " component '" << componentName << "'\n";
+        EXCEPTION1(InvalidVariableException, componentName.c_str());
+      }
+      loadedComponents.push_back(componentData);
+    }
+
+    vtkIdType tupleCount = loadedComponents.front()->GetNumberOfTuples();
+    bool hasDoubleComponent = false;
+    bool hasFloatComponent = false;
+
+    for (vtkDataArray *component : loadedComponents) {
+      if (component->GetNumberOfComponents() != 1) {
+        debug1 << "[openpmd-api-plugin] LoadVectorPatchData component has"
+               << " unexpected component count="
+               << component->GetNumberOfComponents() << "\n";
+        EXCEPTION1(InvalidVariableException, patch.meshName.c_str());
+      }
+      if (component->GetNumberOfTuples() != tupleCount) {
+        debug1 << "[openpmd-api-plugin] LoadVectorPatchData tuple count"
+               << " mismatch for a component\n";
+        EXCEPTION1(InvalidVariableException, patch.meshName.c_str());
+      }
+      if (vtkDoubleArray::SafeDownCast(component) != nullptr) {
+        hasDoubleComponent = true;
+      } else if (vtkFloatArray::SafeDownCast(component) != nullptr) {
+        hasFloatComponent = true;
+      } else {
+        debug1 << "[openpmd-api-plugin] LoadVectorPatchData unsupported"
+               << " vtkDataArray subtype for component\n";
+        EXCEPTION1(InvalidVariableException, patch.meshName.c_str());
+      }
+    }
+
+    const int numComponents = static_cast<int>(components.size());
+    if (hasDoubleComponent) {
+      vtkDoubleArray *vectorArray = vtkDoubleArray::New();
+      vectorArray->SetNumberOfComponents(numComponents);
+      vectorArray->SetNumberOfTuples(tupleCount);
+      double *dest = vectorArray->GetPointer(0);
+
+      for (size_t compIdx = 0; compIdx < loadedComponents.size(); ++compIdx) {
+        vtkDataArray *component = loadedComponents[compIdx];
+        if (auto *doubleComp = vtkDoubleArray::SafeDownCast(component)) {
+          const double *src = doubleComp->GetPointer(0);
+          for (vtkIdType tuple = 0; tuple < tupleCount; ++tuple) {
+            dest[tuple * numComponents + static_cast<int>(compIdx)] = src[tuple];
+          }
+        } else if (auto *floatComp = vtkFloatArray::SafeDownCast(component)) {
+          const float *src = floatComp->GetPointer(0);
+          for (vtkIdType tuple = 0; tuple < tupleCount; ++tuple) {
+            dest[tuple * numComponents + static_cast<int>(compIdx)] =
+                static_cast<double>(src[tuple]);
+          }
+        }
+      }
+
+      result = vectorArray;
+    } else if (hasFloatComponent) {
+      vtkFloatArray *vectorArray = vtkFloatArray::New();
+      vectorArray->SetNumberOfComponents(numComponents);
+      vectorArray->SetNumberOfTuples(tupleCount);
+      float *dest = vectorArray->GetPointer(0);
+
+      for (size_t compIdx = 0; compIdx < loadedComponents.size(); ++compIdx) {
+        auto *floatComp = vtkFloatArray::SafeDownCast(loadedComponents[compIdx]);
+        if (floatComp == nullptr) {
+          debug1 << "[openpmd-api-plugin] LoadVectorPatchData expected"
+                 << " float component but found different type\n";
+          EXCEPTION1(InvalidVariableException, patch.meshName.c_str());
+        }
+        const float *src = floatComp->GetPointer(0);
+        for (vtkIdType tuple = 0; tuple < tupleCount; ++tuple) {
+          dest[tuple * numComponents + static_cast<int>(compIdx)] = src[tuple];
+        }
+      }
+
+      result = vectorArray;
+    }
+
+    if (result == nullptr) {
+      debug1 << "[openpmd-api-plugin] LoadVectorPatchData could not determine"
+             << " a suitable output array type\n";
+      EXCEPTION1(InvalidVariableException, patch.meshName.c_str());
+    }
+
+    for (vtkDataArray *component : loadedComponents) {
+      component->Delete();
+    }
+    loadedComponents.clear();
+
+    debug1 << "[openpmd-api-plugin] LoadVectorPatchData returning array"
+           << " tuples=" << tupleCount << " components=" << numComponents
+           << "\n";
+
+    return result;
+  } catch (...) {
+    for (vtkDataArray *component : loadedComponents) {
+      component->Delete();
+    }
+    if (result != nullptr) {
+      result->Delete();
+    }
+    throw;
+  }
 }
 
 vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
@@ -2026,7 +2207,64 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, int domain,
 //
 // ****************************************************************************
 
-vtkDataArray *avtopenpmdFileFormat::GetVectorVar(int, int,
+vtkDataArray *avtopenpmdFileFormat::GetVectorVar(int timeState, int domain,
                                                  const char *varname) {
-  EXCEPTION1(InvalidVariableException, varname);
+  const char *requestedVar = varname != nullptr ? varname : "<null>";
+  debug1 << "[openpmd-api-plugin] GetVectorVar timeState=" << timeState
+         << " domain=" << domain << " var=" << requestedVar << "\n";
+
+  if (varname == nullptr) {
+    debug1 << "[openpmd-api-plugin] GetVectorVar received null var name\n";
+    EXCEPTION1(InvalidVariableException, requestedVar);
+  }
+
+  auto varIt = vectorVarMap_.find(varname);
+  if (varIt == vectorVarMap_.end()) {
+    debug1 << "[openpmd-api-plugin] GetVectorVar missing var '" << requestedVar
+           << "'\n";
+    EXCEPTION1(InvalidVariableException, varname);
+  }
+
+  const std::string &visitMeshName = std::get<0>(varIt->second);
+  const std::vector<std::string> &components = std::get<1>(varIt->second);
+
+  EnsureHierarchyInitialized(timeState);
+
+  auto &hierarchyMap = meshHierarchyCache_.at(timeState);
+  auto meshIt = hierarchyMap.find(visitMeshName);
+  if (meshIt == hierarchyMap.end()) {
+    debug1 << "[openpmd-api-plugin] GetVectorVar missing hierarchy for mesh '"
+           << visitMeshName << "'\n";
+    EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+  }
+
+  const MeshPatchHierarchy &hierarchy = meshIt->second;
+  if (domain < 0 || domain >= static_cast<int>(hierarchy.patches.size())) {
+    debug1 << "[openpmd-api-plugin] GetVectorVar invalid domain index "
+           << domain << " for mesh '" << visitMeshName << "'\n";
+    EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+  }
+
+  const PatchInfo &patch = hierarchy.patches.at(domain);
+  std::ostringstream ctx;
+  ctx << "GetVectorVar patch domain=" << domain
+      << " components=" << JoinStrings(components);
+  LogPatchSummary(patch, ctx.str());
+
+  unsigned long long iter = iterationIndex_.at(timeState);
+  debug1 << "[openpmd-api-plugin] GetVectorVar loading iteration=" << iter
+         << " components='" << JoinStrings(components) << "'\n";
+  openPMD::Iteration iteration = series_.snapshots()[iter];
+
+  vtkDataArray *data = LoadVectorPatchData(iteration, patch, components);
+  if (data == nullptr) {
+    debug1 << "[openpmd-api-plugin] GetVectorVar LoadVectorPatchData returned"
+           << " nullptr for var '" << requestedVar << "'\n";
+    EXCEPTION1(InvalidVariableException, varname);
+  }
+
+  debug1 << "[openpmd-api-plugin] GetVectorVar success var='" << requestedVar
+         << "'\n";
+
+  return data;
 }
