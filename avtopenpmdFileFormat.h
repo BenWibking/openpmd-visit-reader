@@ -114,6 +114,9 @@ public:
   vtkDataArray *GetVar(int, int, const char *) override;
   vtkDataArray *GetVectorVar(int, int, const char *) override;
 
+  bool HasInvariantMetaData(void) const override { return false; }
+  bool HasInvariantSIL(void) const override { return false; }
+
   enum class DatasetType { Field = 0, ParticleSpecies };
 
   // Order of transposes relative to the layout of data
