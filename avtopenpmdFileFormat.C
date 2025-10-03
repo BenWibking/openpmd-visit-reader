@@ -33,6 +33,7 @@
 #include <DebugStream.h>
 #include <Expression.h>
 #include <InvalidVariableException.h>
+#include <InvalidFilesException.h>
 
 #include "avtopenpmdFileFormat.h"
 #include "dataLayoutTransform.h" // NOLINT(unused-includes)
@@ -190,7 +191,14 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
          << "Reading OpenPMD series: " << opmd_filepath << "\n";
 
   // open openPMD series
-  series_ = openPMD::Series(opmd_filepath, openPMD::Access::READ_ONLY);
+  try {
+    series_ = openPMD::Series(opmd_filepath, openPMD::Access::READ_ONLY);
+  } catch (std::exception const &ex) {
+    std::string msg = std::string("Failed to open openPMD series '") +
+                      opmd_filepath + "': " + ex.what();
+    debug1 << "[openpmd-api-plugin] " << msg << "\n";
+    EXCEPTION1(InvalidFilesException, msg.c_str());
+  }
   debug5 << "[openpmd-api-plugin] "
          << "This file uses openPMD-standard version " << series_.openPMD()
          << '\n';
@@ -495,6 +503,14 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
   hierarchy.topologicalDim = topoDim;
   hierarchy.spatialDim = topoDim;
 
+  auto getValueOr = [](const auto &container, int axis,
+                       auto fallback) -> decltype(fallback) {
+    if (axis >= 0 && axis < static_cast<int>(container.size())) {
+      return container[axis];
+    }
+    return fallback;
+  };
+
   for (auto const &[levelValue, meshName] : levels) {
     openPMD::Mesh mesh = iter.meshes.at(meshName);
     GeometryData geom = GetGeometryXYZ(mesh, true);
@@ -516,7 +532,13 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
 
     std::array<double, 3> spacingPerAxis{0.0, 0.0, 0.0};
     for (int axis = 0; axis < 3; ++axis) {
-      spacingPerAxis[axis] = unitSI * geom.gridSpacing[axis];
+      double spacingValue = getValueOr(geom.gridSpacing, axis, 0.0);
+      if (spacingValue == 0.0 &&
+          axis < static_cast<int>(geom.extent.size()) &&
+          geom.extent[axis] > 1) {
+        spacingValue = 1.0;
+      }
+      spacingPerAxis[axis] = unitSI * spacingValue;
     }
     const int groupId = levelToGroupId[levelValue];
     hierarchy.levelCellSizes[groupId] = spacingPerAxis;
@@ -538,7 +560,8 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
           offsetValue = patch.offset[axis];
         }
 
-        double gridOrigin = unitSI * geom.gridOrigin[axis];
+        double originValue = getValueOr(geom.gridOrigin, axis, 0.0);
+        double gridOrigin = unitSI * originValue;
         patch.origin[axis] =
             gridOrigin + static_cast<double>(offsetValue) * spacing;
       }
@@ -857,7 +880,18 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
 
   // compute transposition of axisLabels -> {'x', 'y', 'z'}
   auto axisLabels = geom.axisLabels;
+  debug5 << "[openpmd-api-plugin] Axis labels (slow->fast) before transpose: ";
+  for (auto const &label : axisLabels) {
+    debug5 << label << ' ';
+  }
+  debug5 << "\n";
+
   auto transpose = GetAxisTranspose(axisLabels, {"x", "y", "z"});
+  debug5 << "[openpmd-api-plugin] Axis transpose mapping: ";
+  for (auto idx : transpose) {
+    debug5 << idx << ' ';
+  }
+  debug5 << "\n";
 
   // transpose geometry data
   TransposeVector(geom.axisLabels, transpose);

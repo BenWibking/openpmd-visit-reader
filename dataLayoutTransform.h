@@ -2,6 +2,7 @@
 #define AVT_openpmd_DATA_LAYOUT_TRANSFORM_H
 
 #include <DebugStream.h>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <mdspan/mdspan.hpp>
@@ -24,9 +25,28 @@ template <typename T>
 void avtopenpmdFileFormat::TransposeVector(std::vector<T> &vec_to_transpose,
                                            std::vector<int> const &transpose) {
   // compute transposition of 'vec_to_transpose' according to 'transpose'
+  const std::size_t srcSize = vec_to_transpose.size();
+  const std::size_t permSize = transpose.size();
+
+  if (srcSize == 0 || permSize == 0) {
+    return;
+  }
+
+  if (srcSize != permSize) {
+    debug5 << "[openpmd-api-plugin] TransposeVector size mismatch: values="
+           << srcSize << " permutation=" << permSize << "\n";
+  }
+
   std::vector<T> vec = vec_to_transpose;
-  for (int i = 0; i < vec.size(); ++i) {
-    vec_to_transpose[i] = vec[transpose[i]];
+  const std::size_t limit = std::min(srcSize, permSize);
+  for (std::size_t i = 0; i < limit; ++i) {
+    const int idx = transpose[i];
+    if (idx < 0 || static_cast<std::size_t>(idx) >= srcSize) {
+      debug5 << "[openpmd-api-plugin] TransposeVector index " << idx
+             << " out of range for size " << srcSize << "\n";
+      continue;
+    }
+    vec_to_transpose[i] = vec[static_cast<std::size_t>(idx)];
   }
 }
 

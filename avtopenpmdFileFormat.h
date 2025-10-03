@@ -90,14 +90,14 @@ public:
   // virtual void        GetTimes(std::vector<double> &);
   //
 
-  virtual int GetNTimesteps(void);
+  int GetNTimesteps(void) override;
 
-  virtual const char *GetType(void) { return "openpmd"; }
-  virtual void FreeUpResources(void);
+  const char *GetType(void) override { return "openpmd"; }
+  void FreeUpResources(void) override;
 
-  virtual vtkDataSet *GetMesh(int, int, const char *);
-  virtual vtkDataArray *GetVar(int, int, const char *);
-  virtual vtkDataArray *GetVectorVar(int, int, const char *);
+  vtkDataSet *GetMesh(int, int, const char *) override;
+  vtkDataArray *GetVar(int, int, const char *) override;
+  vtkDataArray *GetVectorVar(int, int, const char *) override;
 
   enum class DatasetType { Field = 0, ParticleSpecies };
 
@@ -129,7 +129,7 @@ protected:
   std::vector<std::string> overrideMeshAxisLabels_;
   std::vector<std::string> overrideParticleAxisLabels_;
 
-  virtual void PopulateDatabaseMetaData(avtDatabaseMetaData *, int);
+  void PopulateDatabaseMetaData(avtDatabaseMetaData *, int) override;
   virtual void *GetAuxiliaryData(const char *var, int timestep, int domain,
                                  const char *type, void *args,
                                  DestructorFunction &) override;
