@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core reader logic lives in `avtopenpmdFileFormat.C/.h` with layout helpers in `dataLayoutTransform.*`. Generated VisIt metadata shims (`openpmd*PluginInfo.C`) wire the plugin into the host and rarely need manual edits. Vendored dependencies (OpenPMD-api, mdspan, sample datasets) sit under `extern/` and are pulled in by the top-level `CMakeLists.txt`. Build outputs go to `build/`, while `.pmd` fixtures and helper scripts remain in `example_data/`. Keep `VisItLibraryDependencies.cmake` beside `CMakeLists.txt` so VisIt’s toolchain resolves its libraries.
+Core reader logic and data layout transformations live in `avtopenpmdFileFormat.C/.h`. Generated VisIt metadata shims (`openpmd*PluginInfo.C`) wire the plugin into the host and rarely need manual edits. Vendored dependencies (OpenPMD-api, sample datasets) sit under `extern/` and are pulled in by the top-level `CMakeLists.txt`. Build outputs go to `build/`, while `.pmd` fixtures and helper scripts remain in `example_data/`. Keep `VisItLibraryDependencies.cmake` beside `CMakeLists.txt` so VisIt’s toolchain resolves its libraries.
 
 ## Build, Test, and Development Commands
 - `git submodule update --init` — fetches the required externals.

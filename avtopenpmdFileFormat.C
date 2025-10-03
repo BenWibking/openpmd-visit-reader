@@ -17,6 +17,7 @@
 #include <atomic>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <limits>
 #include <sstream>
 #include <cstring>
@@ -41,7 +42,6 @@
 #include <InvalidFilesException.h>
 
 #include "avtopenpmdFileFormat.h"
-#include "dataLayoutTransform.h" // NOLINT(unused-includes)
 
 namespace {
 
@@ -801,6 +801,19 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
     double unitSI = mesh.gridUnitSI();
     avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
+    std::vector<std::string> rawAxisLabels = mesh.axisLabels();
+    if (mesh.dataOrder() == openPMD::Mesh::DataOrder::F) {
+      std::reverse(rawAxisLabels.begin(), rawAxisLabels.end());
+    }
+
+    const std::vector<std::string> &storageAxisLabels =
+        geom.storageAxisLabels.empty() ? rawAxisLabels : geom.storageAxisLabels;
+    std::vector<int> storageToVtkVec = geom.storageToVtk;
+    if (storageToVtkVec.empty()) {
+      storageToVtkVec.resize(3);
+      std::iota(storageToVtkVec.begin(), storageToVtkVec.end(), 0);
+    }
+
     openPMD::ChunkTable chunks = representativeComponent.availableChunks();
     debug5 << "[openpmd-api-plugin]     chunks available=" << chunks.size()
            << " unitSI=" << unitSI << " centering=" << cent << "\n";
@@ -844,9 +857,60 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
       PatchInfo patch;
       patch.level = levelValue;
       patch.meshName = meshName;
-      patch.offset = chunk.offset;
-      patch.extent = chunk.extent;
       patch.centering = chunkCentering;
+      patch.dataOrder = mesh.dataOrder();
+      patch.storageAxisLabels = storageAxisLabels;
+      patch.storageOffset = chunk.offset;
+      patch.storageExtent = chunk.extent;
+
+      const size_t axisCount = storageAxisLabels.size();
+      std::vector<uint64_t> storageOffsetCanonical(axisCount, 0);
+      std::vector<uint64_t> storageExtentCanonical(axisCount, 1);
+
+      for (size_t idx = 0; idx < rawAxisLabels.size(); ++idx) {
+        const std::string &label = rawAxisLabels[idx];
+        auto iter =
+            std::find(storageAxisLabels.begin(), storageAxisLabels.end(), label);
+        if (iter == storageAxisLabels.end()) {
+          continue;
+        }
+        size_t storageIndex = static_cast<size_t>(
+            std::distance(storageAxisLabels.begin(), iter));
+        if (idx < chunk.offset.size()) {
+          storageOffsetCanonical[storageIndex] = chunk.offset[idx];
+        }
+        if (idx < chunk.extent.size()) {
+          storageExtentCanonical[storageIndex] = chunk.extent[idx];
+        }
+      }
+
+      patch.storageOffsetCanonical = storageOffsetCanonical;
+      patch.storageExtentCanonical = storageExtentCanonical;
+
+      openPMD::Offset vtkOffset(3, 0);
+      openPMD::Extent vtkExtent(3, 1);
+      std::array<int, 3> storageToVtk{{-1, -1, -1}};
+      for (size_t axis = 0; axis < 3; ++axis) {
+        int storageIndex = -1;
+        if (axis < storageToVtkVec.size()) {
+          storageIndex = storageToVtkVec[axis];
+        }
+        storageToVtk[axis] = storageIndex;
+        if (storageIndex >= 0 &&
+            storageIndex < static_cast<int>(storageOffsetCanonical.size())) {
+          vtkOffset[axis] =
+              storageOffsetCanonical[static_cast<size_t>(storageIndex)];
+        }
+        if (storageIndex >= 0 &&
+            storageIndex < static_cast<int>(storageExtentCanonical.size())) {
+          vtkExtent[axis] =
+              storageExtentCanonical[static_cast<size_t>(storageIndex)];
+        }
+      }
+
+      patch.storageToVtk = storageToVtk;
+      patch.offset = vtkOffset;
+      patch.extent = vtkExtent;
 
       for (int axis = 0; axis < 3; ++axis) {
         double spacing = spacingPerAxis[axis];
@@ -1161,7 +1225,11 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
     data->SetNumberOfTuples(nelem);
     double *buffer = data->GetPointer(0);
     try {
-      rcomp.loadChunkRaw(buffer, patch.offset, patch.extent);
+      const openPMD::Offset &storageOffset =
+          patch.storageOffset.empty() ? patch.offset : patch.storageOffset;
+      const openPMD::Extent &storageExtent =
+          patch.storageExtent.empty() ? patch.extent : patch.storageExtent;
+      rcomp.loadChunkRaw(buffer, storageOffset, storageExtent);
       const_cast<openPMD::Series &>(series_).flush();
     } catch (std::exception const &ex) {
       debug1 << "[openpmd-api-plugin] LoadScalarPatchData exception (double): "
@@ -1170,6 +1238,7 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
       throw;
     }
     ScaleVarData<double>(buffer, nelem, rcomp.unitSI());
+    RemapChunkToVTKLayout(buffer, static_cast<size_t>(nelem), patch);
     result = data;
   } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
     vtkFloatArray *data = vtkFloatArray::New();
@@ -1177,7 +1246,11 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
     data->SetNumberOfTuples(nelem);
     float *buffer = data->GetPointer(0);
     try {
-      rcomp.loadChunkRaw(buffer, patch.offset, patch.extent);
+      const openPMD::Offset &storageOffset =
+          patch.storageOffset.empty() ? patch.offset : patch.storageOffset;
+      const openPMD::Extent &storageExtent =
+          patch.storageExtent.empty() ? patch.extent : patch.storageExtent;
+      rcomp.loadChunkRaw(buffer, storageOffset, storageExtent);
       const_cast<openPMD::Series &>(series_).flush();
     } catch (std::exception const &ex) {
       debug1 << "[openpmd-api-plugin] LoadScalarPatchData exception (float): "
@@ -1186,6 +1259,7 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
       throw;
     }
     ScaleVarData<float>(buffer, nelem, rcomp.unitSI());
+    RemapChunkToVTKLayout(buffer, static_cast<size_t>(nelem), patch);
     result = data;
   } else {
     debug1 << "[openpmd-api-plugin] LoadScalarPatchData unsupported datatype="
@@ -1331,6 +1405,7 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(
 
   GeometryData geom;
   geom.axisLabels = axisLabels;
+  geom.storageAxisLabels = axisLabels;
   geom.extent = extent;
   geom.gridOrigin = gridOrigin;
   geom.gridSpacing = gridSpacing;
@@ -1368,6 +1443,8 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(
   }
   debug5 << "\n";
 
+  geom.storageToVtk = transpose;
+
   // transpose geometry data
   TransposeVector(geom.axisLabels, transpose);
   TransposeVector(geom.extent, transpose);
@@ -1388,6 +1465,29 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(
          << JoinContainer(geom.position) << "\n";
 
   return geom;
+}
+
+std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
+    std::vector<std::string> const &axisLabelsSrc,
+    std::vector<std::string> const &axisLabelsDst) {
+  auto getIndexOf = [](std::string const &label,
+                       std::vector<std::string> const &axes) {
+    auto iter = std::find(axes.begin(), axes.end(), label);
+    if (iter != axes.end()) {
+      return static_cast<int>(std::distance(axes.begin(), iter));
+    }
+    return -1;
+  };
+
+  std::vector<int> transpose;
+  transpose.reserve(axisLabelsDst.size());
+  for (auto const &axis : axisLabelsDst) {
+    int idx = getIndexOf(axis, axisLabelsSrc);
+    if (idx != -1) {
+      transpose.push_back(idx);
+    }
+  }
+  return transpose;
 }
 
 // ****************************************************************************

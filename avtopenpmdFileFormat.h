@@ -9,6 +9,7 @@
 #ifndef AVT_openpmd_FILE_FORMAT_H
 #define AVT_openpmd_FILE_FORMAT_H
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
@@ -30,6 +31,8 @@ struct GeometryData {
   std::vector<double> gridSpacing;
   std::vector<double> gridOrigin;
   std::vector<double> position;
+  std::vector<std::string> storageAxisLabels;
+  std::vector<int> storageToVtk;
 };
 
 // ****************************************************************************
@@ -47,6 +50,13 @@ struct PatchInfo {
   int level{0};
   openPMD::Offset offset{};
   openPMD::Extent extent{};
+  openPMD::Offset storageOffset{};
+  openPMD::Extent storageExtent{};
+  std::vector<uint64_t> storageOffsetCanonical;
+  std::vector<uint64_t> storageExtentCanonical;
+  std::vector<std::string> storageAxisLabels;
+  std::array<int, 3> storageToVtk{{0, 1, 2}};
+  openPMD::Mesh::DataOrder dataOrder{openPMD::Mesh::DataOrder::C};
   std::string meshName;
   double origin[3]{0.0, 0.0, 0.0};
   double spacing[3]{0.0, 0.0, 0.0};
@@ -106,15 +116,6 @@ public:
   // Order of transposes relative to the layout of data
   // For 3D data : in case of (z, y, x) ordering of axes
   const std::vector<int> _3d = {2, 1, 0};
-  // For 2D data : in case of (z, x) ordering of axes
-  const std::vector<int> _2d_xz = {1, 2, 0};
-  // For 2D data : in case of (y, x) ordering of axes
-  const std::vector<int> _2d_xy = {1, 0, 2};
-  // For 1D data : in case data layout (z)
-  const std::vector<int> _1d = {2, 1, 0};
-  // identity transpose
-  const std::vector<int> _identity = {0, 1, 2};
-
 protected:
   // DATA MEMBERS
   openPMD::Series series_;
@@ -181,8 +182,8 @@ protected:
                        std::vector<int> const &transpose);
 
   template <typename T>
-  void TransposeArray(T *data_ptr, openPMD::Mesh const &mesh,
-                      openPMD::Mesh::MeshRecordComponent const &rcomp);
+  void RemapChunkToVTKLayout(T *data_ptr, size_t nelem,
+                              const PatchInfo &patch) const;
 };
 
 template <typename T>
@@ -233,6 +234,138 @@ template <typename T>
 void avtopenpmdFileFormat::ScaleVarData(T *xyz_ptr, size_t nelem, T unitSI) {
   for (size_t idx = 0; idx < nelem; idx++) {
     xyz_ptr[idx] *= unitSI;
+  }
+}
+
+template <typename T>
+void avtopenpmdFileFormat::TransposeVector(
+    std::vector<T> &vec_to_transpose, std::vector<int> const &transpose) {
+  const std::size_t srcSize = vec_to_transpose.size();
+  const std::size_t permSize = transpose.size();
+
+  if (srcSize == 0 || permSize == 0) {
+    return;
+  }
+
+  if (srcSize != permSize) {
+    debug5 << "[openpmd-api-plugin] TransposeVector size mismatch: values="
+           << srcSize << " permutation=" << permSize << "\n";
+  }
+
+  std::vector<T> vec = vec_to_transpose;
+  const std::size_t limit = std::min(srcSize, permSize);
+  for (std::size_t i = 0; i < limit; ++i) {
+    const int idx = transpose[i];
+    if (idx < 0 || static_cast<std::size_t>(idx) >= srcSize) {
+      debug5 << "[openpmd-api-plugin] TransposeVector index " << idx
+             << " out of range for size " << srcSize << "\n";
+      continue;
+    }
+    vec_to_transpose[i] = vec[static_cast<std::size_t>(idx)];
+  }
+}
+
+template <typename T>
+void avtopenpmdFileFormat::RemapChunkToVTKLayout(T *data_ptr, size_t nelem,
+                                                 const PatchInfo &patch) const {
+  if (data_ptr == nullptr || nelem == 0) {
+    return;
+  }
+
+  const auto &storageDims = patch.storageExtentCanonical;
+  const auto &storageToVtk = patch.storageToVtk;
+  if (storageDims.empty()) {
+    return;
+  }
+
+  bool requiresRemap = patch.dataOrder == openPMD::Mesh::DataOrder::F;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (storageToVtk[axis] >= 0 && storageToVtk[axis] != axis) {
+      requiresRemap = true;
+      break;
+    }
+  }
+
+  if (!requiresRemap) {
+    return;
+  }
+
+  const size_t rank = storageDims.size();
+  if (rank == 0) {
+    return;
+  }
+
+  std::array<size_t, 3> vtkDims{1, 1, 1};
+  for (size_t axis = 0; axis < std::min<size_t>(3, patch.extent.size()); ++axis) {
+    vtkDims[axis] = static_cast<size_t>(patch.extent[axis] == 0 ? 1 : patch.extent[axis]);
+  }
+  size_t expectedCount = vtkDims[0] * vtkDims[1] * vtkDims[2];
+  if (expectedCount != nelem) {
+    expectedCount = 1;
+    for (auto dim : patch.extent) {
+      expectedCount *= static_cast<size_t>(dim == 0 ? 1 : dim);
+    }
+    if (expectedCount != nelem) {
+      return;
+    }
+  }
+
+  std::vector<size_t> storageDimSizes(rank, 1);
+  for (size_t idx = 0; idx < rank; ++idx) {
+    storageDimSizes[idx] = static_cast<size_t>(storageDims[idx] == 0 ? 1 : storageDims[idx]);
+  }
+
+  size_t storageCount = 1;
+  for (auto dim : storageDimSizes) {
+    storageCount *= dim;
+  }
+  if (storageCount != nelem) {
+    return;
+  }
+
+  std::vector<size_t> storageStrides(rank, 1);
+  if (patch.dataOrder == openPMD::Mesh::DataOrder::F) {
+    for (size_t idx = 1; idx < rank; ++idx) {
+      storageStrides[idx] = storageStrides[idx - 1] * storageDimSizes[idx - 1];
+    }
+  } else {
+    if (rank >= 1) {
+      storageStrides[rank - 1] = 1;
+      for (size_t idx = rank - 1; idx > 0; --idx) {
+        storageStrides[idx - 1] = storageStrides[idx] * storageDimSizes[idx];
+      }
+    }
+  }
+
+  std::vector<T> copy(data_ptr, data_ptr + nelem);
+  std::vector<size_t> coordsStorage(rank, 0);
+  std::array<size_t, 3> coordsVtk{0, 0, 0};
+
+  for (size_t z = 0; z < vtkDims[2]; ++z) {
+    coordsVtk[2] = z;
+    for (size_t y = 0; y < vtkDims[1]; ++y) {
+      coordsVtk[1] = y;
+      for (size_t x = 0; x < vtkDims[0]; ++x) {
+        coordsVtk[0] = x;
+        std::fill(coordsStorage.begin(), coordsStorage.end(), 0);
+        for (size_t axis = 0; axis < 3; ++axis) {
+          int storageIndex = storageToVtk[axis];
+          if (storageIndex < 0 ||
+              storageIndex >= static_cast<int>(coordsStorage.size())) {
+            continue;
+          }
+          coordsStorage[static_cast<size_t>(storageIndex)] = coordsVtk[axis];
+        }
+
+        size_t storageIndexLinear = 0;
+        for (size_t axis = 0; axis < rank; ++axis) {
+          storageIndexLinear += coordsStorage[axis] * storageStrides[axis];
+        }
+
+        size_t vtkIndex = x + vtkDims[0] * (y + vtkDims[1] * z);
+        data_ptr[vtkIndex] = copy[storageIndexLinear];
+      }
+    }
   }
 }
 
