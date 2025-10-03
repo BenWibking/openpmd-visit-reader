@@ -71,7 +71,7 @@ struct MeshPatchHierarchy {
 class avtopenpmdFileFormat : public avtMTMDFileFormat {
 public:
   avtopenpmdFileFormat(const char *);
-  virtual ~avtopenpmdFileFormat() { ; }
+  ~avtopenpmdFileFormat() override;
 
   //
   // This is used to return unconvention data -- ranging from material

@@ -7,3 +7,6 @@
 [submodule "extern/openPMD-example-datasets"]
 	path = extern/openPMD-example-datasets
 	url = https://github.com/openPMD/openPMD-example-datasets.git
+[submodule "extern/cpptrace"]
+	path = extern/cpptrace
+	url = https://github.com/jeremy-rifkin/cpptrace.git

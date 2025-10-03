@@ -4,7 +4,7 @@
 
 #include <openpmdPluginInfo.h>
 #include <avtopenpmdFileFormat.h>
-#include <avtMTSDFileFormatInterface.h>
+#include <avtMTMDFileFormatInterface.h>
 #include <avtGenericDatabase.h>
 
 // ****************************************************************************
@@ -44,17 +44,23 @@ avtDatabase *
 openpmdCommonPluginInfo::SetupDatabase(const char *const *list,
                                    int nList, int nBlock)
 {
+    if (nBlock <= 0)
+    {
+        nBlock = 1;
+    }
     int nTimestepGroups = nList / nBlock;
-    avtMTSDFileFormat ***ffl = new avtMTSDFileFormat**[nTimestepGroups];
+    if (nTimestepGroups <= 0)
+    {
+        nTimestepGroups = 1;
+    }
+
+    avtMTMDFileFormat **ffl = new avtMTMDFileFormat *[nTimestepGroups];
     for (int i = 0; i < nTimestepGroups; i++)
     {
-        ffl[i] = new avtMTSDFileFormat*[nBlock];
-        for (int j = 0; j < nBlock; j++)
-        {
-            ffl[i][j] = dynamic_cast<avtMTSDFileFormat*>(new avtopenpmdFileFormat(list[i*nBlock + j]));
-        }
+        const int index = i * nBlock;
+        ffl[i] = new avtopenpmdFileFormat(list[index]);
     }
-    avtMTSDFileFormatInterface *inter
-           = new avtMTSDFileFormatInterface(ffl, nTimestepGroups, nBlock);
+    avtMTMDFileFormatInterface *inter
+           = new avtMTMDFileFormatInterface(ffl, nTimestepGroups);
     return new avtGenericDatabase(inter);
 }
