@@ -503,6 +503,23 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
   hierarchy.topologicalDim = topoDim;
   hierarchy.spatialDim = topoDim;
 
+  debug5 << "[openpmd-api-plugin] BuildHierarchy -- visitMeshName="
+         << visitMeshName << " levels=" << uniqueLevels.size()
+         << " representativeMesh=" << representativeMeshName << "\n";
+  debug5 << "[openpmd-api-plugin] Representative extent:";
+  for (auto v : repGeom.extent) {
+    debug5 << ' ' << v;
+  }
+  debug5 << " gridSpacing:";
+  for (auto v : repGeom.gridSpacing) {
+    debug5 << ' ' << v;
+  }
+  debug5 << " gridOrigin:";
+  for (auto v : repGeom.gridOrigin) {
+    debug5 << ' ' << v;
+  }
+  debug5 << "\n";
+
   auto getValueOr = [](const auto &container, int axis,
                        auto fallback) -> decltype(fallback) {
     if (axis >= 0 && axis < static_cast<int>(container.size())) {
@@ -512,6 +529,8 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
   };
 
   for (auto const &[levelValue, meshName] : levels) {
+    debug5 << "[openpmd-api-plugin]   processing mesh='" << meshName
+           << "' level=" << levelValue << "\n";
     openPMD::Mesh mesh = iter.meshes.at(meshName);
     GeometryData geom = GetGeometryXYZ(mesh, true);
     double unitSI = mesh.gridUnitSI();
@@ -523,6 +542,8 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
                                       : mesh.begin()->second;
 
     openPMD::ChunkTable chunks = representativeComponent.availableChunks();
+    debug5 << "[openpmd-api-plugin]     chunks available=" << chunks.size()
+           << " unitSI=" << unitSI << " centering=" << cent << "\n";
     if (chunks.empty()) {
       openPMD::WrittenChunkInfo wholeDataset(
           openPMD::Offset(representativeComponent.getExtent().size(), 0),
@@ -533,13 +554,23 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
     std::array<double, 3> spacingPerAxis{0.0, 0.0, 0.0};
     for (int axis = 0; axis < 3; ++axis) {
       double spacingValue = getValueOr(geom.gridSpacing, axis, 0.0);
+      debug5 << "[openpmd-api-plugin]     axis=" << axis
+             << " spacingRaw=" << spacingValue
+             << " extent="
+             << (axis < static_cast<int>(geom.extent.size())
+                     ? geom.extent[axis]
+                     : 0)
+             << '\n';
       if (spacingValue == 0.0 &&
           axis < static_cast<int>(geom.extent.size()) &&
           geom.extent[axis] > 1) {
+        debug5 << "[openpmd-api-plugin]       spacing fallback -> 1.0\n";
         spacingValue = 1.0;
       }
       spacingPerAxis[axis] = unitSI * spacingValue;
     }
+    debug5 << "[openpmd-api-plugin]     spacingPerAxis=" << spacingPerAxis[0]
+           << ',' << spacingPerAxis[1] << ',' << spacingPerAxis[2] << "\n";
     const int groupId = levelToGroupId[levelValue];
     hierarchy.levelCellSizes[groupId] = spacingPerAxis;
 
@@ -565,6 +596,18 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
         patch.origin[axis] =
             gridOrigin + static_cast<double>(offsetValue) * spacing;
       }
+
+      debug5 << "[openpmd-api-plugin]       patch offset=";
+      for (auto v : patch.offset) {
+        debug5 << ' ' << v;
+      }
+      debug5 << " extent=";
+      for (auto v : patch.extent) {
+        debug5 << ' ' << v;
+      }
+      debug5 << " spacing=" << patch.spacing[0] << ',' << patch.spacing[1]
+             << ',' << patch.spacing[2] << " origin=" << patch.origin[0]
+             << ',' << patch.origin[1] << ',' << patch.origin[2] << "\n";
 
       ComputeLogicalExtents(patch);
 
