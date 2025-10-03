@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -144,6 +145,78 @@ inline bool IsChildPatch(const PatchInfo &coarse, const PatchInfo &fine) {
   }
 
   return true;
+}
+
+template <typename T>
+inline void DuplicateHighEndNodes(const PatchInfo &patch, T *values) {
+  if (values == nullptr || patch.centering != AVT_NODECENT) {
+    return;
+  }
+
+  std::array<uint64_t, 3> vtkDims{1, 1, 1};
+  for (int axis = 0; axis < 3; ++axis) {
+    if (axis < static_cast<int>(patch.extent.size())) {
+      uint64_t dim = patch.extent[axis];
+      vtkDims[axis] = dim == 0 ? 1 : dim;
+    }
+  }
+
+  const auto &storageDims = patch.storageExtentCanonical;
+  const auto &storageToVtk = patch.storageToVtk;
+  std::array<uint64_t, 3> validDims{1, 1, 1};
+  bool requiresDuplication = false;
+  for (int axis = 0; axis < 3; ++axis) {
+    int storageIndex = storageToVtk[axis];
+    uint64_t dimValue = vtkDims[axis];
+    if (storageIndex >= 0 &&
+        storageIndex < static_cast<int>(storageDims.size())) {
+      dimValue = storageDims[static_cast<size_t>(storageIndex)];
+    }
+    if (dimValue == 0) {
+      dimValue = 1;
+    }
+    validDims[axis] = dimValue;
+    if (vtkDims[axis] > dimValue) {
+      requiresDuplication = true;
+    }
+  }
+
+  if (!requiresDuplication) {
+    return;
+  }
+
+  uint64_t totalElements = vtkDims[0] * vtkDims[1] * vtkDims[2];
+  for (uint64_t linear = 0; linear < totalElements; ++linear) {
+    uint64_t tmp = linear;
+    std::array<uint64_t, 3> coords{0, 0, 0};
+    for (int axis = 0; axis < 3; ++axis) {
+      const uint64_t dim = vtkDims[axis];
+      if (dim > 0) {
+        coords[axis] = tmp % dim;
+        tmp /= dim;
+      } else {
+        coords[axis] = 0;
+      }
+    }
+
+    bool needsCopy = false;
+    std::array<uint64_t, 3> srcCoords = coords;
+    for (int axis = 0; axis < 3; ++axis) {
+      uint64_t valid = validDims[axis];
+      if (coords[axis] >= valid) {
+        needsCopy = true;
+        srcCoords[axis] = valid > 0 ? valid - 1 : 0;
+      }
+    }
+
+    if (!needsCopy) {
+      continue;
+    }
+
+    uint64_t srcIndex =
+        srcCoords[0] + vtkDims[0] * (srcCoords[1] + vtkDims[1] * srcCoords[2]);
+    values[linear] = values[static_cast<size_t>(srcIndex)];
+  }
 }
 
 inline std::vector<int> MakeRefinementVector(const std::array<int, 3> &ratio,
@@ -350,6 +423,7 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   std::string opmd_filestring;
   std::string opmd_overrideMeshAxisLabels;
   std::string opmd_overrideParticleAxisLabels;
+  std::string opmd_overrideMeshDataOrder;
 
   {
     std::ifstream file(filename);
@@ -389,6 +463,34 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
              << JoinStrings(overrideParticleAxisLabels_) << "\n";
     } else {
       debug3 << "[openpmd-api-plugin] overrideParticleAxisLabels disabled\n";
+    }
+
+    if (std::getline(file, opmd_overrideMeshDataOrder)) {
+      std::istringstream orderStream(opmd_overrideMeshDataOrder);
+      std::string token;
+      if (orderStream >> token) {
+        if (!token.empty() && token[0] != '#') {
+          char letter = static_cast<char>(std::toupper(static_cast<unsigned char>(token[0])));
+          if (letter == 'F') {
+            doOverrideMeshDataOrder_ = true;
+            overrideMeshDataOrder_ = openPMD::Mesh::DataOrder::F;
+            debug3 << "[openpmd-api-plugin] overrideMeshDataOrder enabled: F\n";
+          } else if (letter == 'C') {
+            doOverrideMeshDataOrder_ = true;
+            overrideMeshDataOrder_ = openPMD::Mesh::DataOrder::C;
+            debug3 << "[openpmd-api-plugin] overrideMeshDataOrder enabled: C\n";
+          } else {
+            debug1 << "[openpmd-api-plugin] Unknown dataOrder override token '"
+                   << token << "'\n";
+          }
+        } else {
+          debug3 << "[openpmd-api-plugin] overrideMeshDataOrder ignored (comment)\n";
+        }
+      } else {
+        debug3 << "[openpmd-api-plugin] overrideMeshDataOrder disabled\n";
+      }
+    } else {
+      debug3 << "[openpmd-api-plugin] overrideMeshDataOrder disabled\n";
     }
 
     // close file
@@ -486,11 +588,8 @@ void avtopenpmdFileFormat::FreeUpResources(void) {
   debug1 << "[openpmd-api-plugin] FreeUpResources\n";
 }
 
-void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
-                                               openPMD::Iteration const &i,
-                                               int timeState) {
-  debug1 << "[openpmd-api-plugin] BuildFieldHierarchy timeState=" << timeState
-         << " meshCount=" << i.meshes.size() << "\n";
+void avtopenpmdFileFormat::PopulateHierarchyCache(
+    openPMD::Iteration const &i, int timeState, avtDatabaseMetaData *md) {
   struct LevelEntry {
     int level;
     std::string meshName;
@@ -533,26 +632,27 @@ void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
            << "' patches=" << hierarchy.patches.size()
            << " levels=" << hierarchy.numLevels << "\n";
 
-    avtMeshMetaData *meshMd = new avtMeshMetaData;
-    meshMd->name = visitMeshName;
-    meshMd->meshType = AVT_AMR_MESH;
-    meshMd->topologicalDimension = hierarchy.topologicalDim;
-    meshMd->spatialDimension = hierarchy.spatialDim;
-    meshMd->numBlocks = static_cast<int>(hierarchy.patches.size());
-    meshMd->blockTitle = "patches";
-    meshMd->blockPieceName = "patch";
-    meshMd->numGroups = hierarchy.numLevels;
-    meshMd->groupTitle = "levels";
-    meshMd->groupPieceName = "level";
-    meshMd->blockNames = hierarchy.blockNames;
-    meshMd->containsGhostZones = AVT_HAS_GHOSTS;
-    meshMd->presentGhostZoneTypes = (1 << AVT_NESTING_GHOST_ZONES);
-    md->Add(meshMd);
-    md->AddGroupInformation(hierarchy.numLevels,
-                            static_cast<int>(hierarchy.patches.size()),
-                            hierarchy.groupIds);
+    if (md != nullptr) {
+      avtMeshMetaData *meshMd = new avtMeshMetaData;
+      meshMd->name = visitMeshName;
+      meshMd->meshType = AVT_AMR_MESH;
+      meshMd->topologicalDimension = hierarchy.topologicalDim;
+      meshMd->spatialDimension = hierarchy.spatialDim;
+      meshMd->numBlocks = static_cast<int>(hierarchy.patches.size());
+      meshMd->blockTitle = "patches";
+      meshMd->blockPieceName = "patch";
+      meshMd->numGroups = hierarchy.numLevels;
+      meshMd->groupTitle = "levels";
+      meshMd->groupPieceName = "level";
+      meshMd->blockNames = hierarchy.blockNames;
+      meshMd->containsGhostZones = AVT_HAS_GHOSTS;
+      meshMd->presentGhostZoneTypes = (1 << AVT_NESTING_GHOST_ZONES);
+      md->Add(meshMd);
+      md->AddGroupInformation(hierarchy.numLevels,
+                              static_cast<int>(hierarchy.patches.size()),
+                              hierarchy.groupIds);
+    }
 
-    // Register scalar variables using the finest-level mesh as representative.
     const std::string &representativeMeshName = levels.back().second;
     openPMD::Mesh mesh = i.meshes.at(representativeMeshName);
 
@@ -562,7 +662,9 @@ void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
       if (cent != AVT_UNKNOWN_CENT) {
         varMap_[varname] = std::tuple(visitMeshName,
                                        openPMD::MeshRecordComponent::SCALAR);
-        AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+        if (md != nullptr) {
+          AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+        }
         debug2 << "[openpmd-api-plugin] Registered scalar var '" << varname
                << "' centering=" << CenteringToString(cent)
                << " representativeMesh='" << representativeMeshName << "'\n";
@@ -578,7 +680,9 @@ void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
             GetCenteringType<openPMD::MeshRecordComponent>(rc.second);
         if (cent != AVT_UNKNOWN_CENT) {
           varMap_[varname] = std::tuple(visitMeshName, componentName);
-          AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+          if (md != nullptr) {
+            AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+          }
           debug2 << "[openpmd-api-plugin] Registered component var '"
                  << varname << "' centering=" << CenteringToString(cent)
                  << " representativeMesh='" << representativeMeshName
@@ -591,6 +695,22 @@ void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
     }
   }
 
+  if (md == nullptr) {
+    debug1 << "[openpmd-api-plugin] Field hierarchy cache populated for"
+           << " timeState=" << timeState
+           << " meshes=" << hierarchyMap.size() << "\n";
+  }
+}
+
+void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
+                                               openPMD::Iteration const &i,
+                                               int timeState) {
+  debug1 << "[openpmd-api-plugin] BuildFieldHierarchy timeState=" << timeState
+         << " meshCount=" << i.meshes.size() << "\n";
+
+  PopulateHierarchyCache(i, timeState, md);
+
+  auto &hierarchyMap = meshHierarchyCache_.at(timeState);
   debug1 << "[openpmd-api-plugin] Field hierarchy complete. Registered "
          << hierarchyMap.size() << " meshes and " << varMap_.size()
          << " scalars\n";
@@ -641,6 +761,27 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
          << " vars=" << varMap_.size() << "\n";
 }
 
+void avtopenpmdFileFormat::EnsureHierarchyInitialized(int timeState) {
+  if (timeState < 0 ||
+      timeState >= static_cast<int>(meshHierarchyCache_.size())) {
+    debug1 << "[openpmd-api-plugin] EnsureHierarchyInitialized out-of-range"
+           << " timeState=" << timeState
+           << " cacheSize=" << meshHierarchyCache_.size() << "\n";
+    EXCEPTION1(InvalidVariableException, "timestep out of range");
+  }
+
+  auto &hierarchyMap = meshHierarchyCache_.at(timeState);
+  if (!hierarchyMap.empty()) {
+    return;
+  }
+
+  unsigned long long iterIdx = iterationIndex_.at(timeState);
+  debug1 << "[openpmd-api-plugin] Lazy hierarchy initialization for timeState="
+         << timeState << " iteration=" << iterIdx << "\n";
+  openPMD::Iteration iter = series_.snapshots()[iterIdx];
+  PopulateHierarchyCache(iter, timeState, nullptr);
+}
+
 void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
                                              int domain, const char *type,
                                              void *args, DestructorFunction &df) {
@@ -665,6 +806,8 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
       debug1 << "[openpmd-api-plugin] Auxiliary request out-of-range timestep\n";
       return NULL;
     }
+
+    EnsureHierarchyInitialized(timestep);
 
     const std::string meshName(var);
     auto &hierarchyMap = meshHierarchyCache_[timestep];
@@ -894,11 +1037,23 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
                                       : mesh.begin()->second;
 
     GeometryData geom = GetGeometryXYZ(mesh, &representativeComponent, true);
+    auto dataOrder = GetEffectiveMeshDataOrder(mesh);
     double unitSI = mesh.gridUnitSI();
     avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
+    std::array<uint64_t, 3> globalExtent{{1, 1, 1}};
+    for (int axis = 0; axis < 3; ++axis) {
+      if (axis < static_cast<int>(geom.extent.size())) {
+        uint64_t extentValue = geom.extent[axis];
+        if (extentValue == 0) {
+          extentValue = 1;
+        }
+        globalExtent[axis] = extentValue;
+      }
+    }
+
     std::vector<std::string> rawAxisLabels = mesh.axisLabels();
-    if (mesh.dataOrder() == openPMD::Mesh::DataOrder::F) {
+    if (dataOrder == openPMD::Mesh::DataOrder::F) {
       std::reverse(rawAxisLabels.begin(), rawAxisLabels.end());
     }
 
@@ -954,7 +1109,7 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
       patch.level = levelValue;
       patch.meshName = meshName;
       patch.centering = chunkCentering;
-      patch.dataOrder = mesh.dataOrder();
+      patch.dataOrder = dataOrder;
       patch.storageAxisLabels = storageAxisLabels;
       patch.storageOffset = chunk.offset;
       patch.storageExtent = chunk.extent;
@@ -1001,6 +1156,20 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
             storageIndex < static_cast<int>(storageExtentCanonical.size())) {
           vtkExtent[axis] =
               storageExtentCanonical[static_cast<size_t>(storageIndex)];
+        }
+      }
+
+      if (chunkCentering == AVT_NODECENT) {
+        for (int axis = 0; axis < 3; ++axis) {
+          uint64_t localExtent = vtkExtent[axis];
+          uint64_t offsetValue = vtkOffset[axis];
+          uint64_t globalAxisExtent = globalExtent[axis];
+          if (localExtent == 0) {
+            localExtent = 1;
+          }
+          if (offsetValue + localExtent < globalAxisExtent) {
+            vtkExtent[axis] = localExtent + 1;
+          }
         }
       }
 
@@ -1454,12 +1623,21 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
   openPMD::Mesh mesh = meshIt->second;
   openPMD::MeshRecordComponent rcomp = mesh[component];
 
-  uint64_t nelem = 1;
+  uint64_t vtkElementCount = 1;
   for (auto const &nx : patch.extent) {
-    nelem *= nx;
+    vtkElementCount *= (nx == 0 ? 1 : nx);
   }
 
-  debug1 << "[openpmd-api-plugin] LoadScalarPatchData elements=" << nelem
+  const openPMD::Extent &storageExtent =
+      patch.storageExtent.empty() ? patch.extent : patch.storageExtent;
+
+  uint64_t storageElementCount = 1;
+  for (auto const &nx : storageExtent) {
+    storageElementCount *= (nx == 0 ? 1 : nx);
+  }
+
+  debug1 << "[openpmd-api-plugin] LoadScalarPatchData elements="
+         << vtkElementCount << " storageElements=" << storageElementCount
          << " unitSI=" << rcomp.unitSI()
          << " datatype=" << static_cast<int>(rcomp.getDatatype()) << "\n";
 
@@ -1468,13 +1646,11 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
   if (rcomp.getDatatype() == openPMD::Datatype::DOUBLE) {
     vtkDoubleArray *data = vtkDoubleArray::New();
     data->SetNumberOfComponents(1);
-    data->SetNumberOfTuples(nelem);
+    data->SetNumberOfTuples(static_cast<vtkIdType>(vtkElementCount));
     double *buffer = data->GetPointer(0);
     try {
       const openPMD::Offset &storageOffset =
           patch.storageOffset.empty() ? patch.offset : patch.storageOffset;
-      const openPMD::Extent &storageExtent =
-          patch.storageExtent.empty() ? patch.extent : patch.storageExtent;
       rcomp.loadChunkRaw(buffer, storageOffset, storageExtent);
       const_cast<openPMD::Series &>(series_).flush();
     } catch (std::exception const &ex) {
@@ -1483,19 +1659,18 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
       data->Delete();
       throw;
     }
-    ScaleVarData<double>(buffer, nelem, rcomp.unitSI());
-    RemapChunkToVTKLayout(buffer, static_cast<size_t>(nelem), patch);
+    ScaleVarData<double>(buffer, storageElementCount, rcomp.unitSI());
+    RemapChunkToVTKLayout(buffer, static_cast<size_t>(storageElementCount), patch);
+    DuplicateHighEndNodes(patch, buffer);
     result = data;
   } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
     vtkFloatArray *data = vtkFloatArray::New();
     data->SetNumberOfComponents(1);
-    data->SetNumberOfTuples(nelem);
+    data->SetNumberOfTuples(static_cast<vtkIdType>(vtkElementCount));
     float *buffer = data->GetPointer(0);
     try {
       const openPMD::Offset &storageOffset =
           patch.storageOffset.empty() ? patch.offset : patch.storageOffset;
-      const openPMD::Extent &storageExtent =
-          patch.storageExtent.empty() ? patch.extent : patch.storageExtent;
       rcomp.loadChunkRaw(buffer, storageOffset, storageExtent);
       const_cast<openPMD::Series &>(series_).flush();
     } catch (std::exception const &ex) {
@@ -1504,8 +1679,9 @@ vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
       data->Delete();
       throw;
     }
-    ScaleVarData<float>(buffer, nelem, rcomp.unitSI());
-    RemapChunkToVTKLayout(buffer, static_cast<size_t>(nelem), patch);
+    ScaleVarData<float>(buffer, storageElementCount, rcomp.unitSI());
+    RemapChunkToVTKLayout(buffer, static_cast<size_t>(storageElementCount), patch);
+    DuplicateHighEndNodes(patch, buffer);
     result = data;
   } else {
     debug1 << "[openpmd-api-plugin] LoadScalarPatchData unsupported datatype="
@@ -1537,8 +1713,11 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
     EXCEPTION1(InvalidVariableException, meshName);
   }
 
-  auto hierarchyMapIt = meshHierarchyCache_.at(timeState).find(visit_meshname);
-  if (hierarchyMapIt == meshHierarchyCache_.at(timeState).end()) {
+  EnsureHierarchyInitialized(timeState);
+
+  auto &hierarchyMap = meshHierarchyCache_.at(timeState);
+  auto hierarchyMapIt = hierarchyMap.find(visit_meshname);
+  if (hierarchyMapIt == hierarchyMap.end()) {
     debug1 << "[openpmd-api-plugin] GetMesh missing mesh '" << meshName
            << "'\n";
     EXCEPTION1(InvalidVariableException, visit_meshname);
@@ -1574,7 +1753,12 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(
     openPMD::MeshRecordComponent const *representative,
     bool insertMissingAxes) {
   // get dataOrder
-  auto dataOrder = mesh.dataOrder();
+  auto dataOrder = GetEffectiveMeshDataOrder(mesh);
+  if (doOverrideMeshDataOrder_) {
+    debug5 << "[openpmd-api-plugin] overrideMeshDataOrder applied: "
+           << DataOrderToString(dataOrder) << " (original="
+           << DataOrderToString(mesh.dataOrder()) << ")\n";
+  }
 
   // get axis labels
   std::vector<std::string> axisLabels = mesh.axisLabels();
@@ -1716,6 +1900,14 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(
   return geom;
 }
 
+openPMD::Mesh::DataOrder
+avtopenpmdFileFormat::GetEffectiveMeshDataOrder(openPMD::Mesh const &mesh) const {
+  if (doOverrideMeshDataOrder_) {
+    return overrideMeshDataOrder_;
+  }
+  return mesh.dataOrder();
+}
+
 std::vector<int> avtopenpmdFileFormat::GetAxisTranspose(
     std::vector<std::string> const &axisLabelsSrc,
     std::vector<std::string> const &axisLabelsDst) {
@@ -1775,6 +1967,8 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, int domain,
 
   const std::string &visitMeshName = std::get<0>(varIt->second);
   const std::string &component = std::get<1>(varIt->second);
+
+  EnsureHierarchyInitialized(timeState);
 
   auto &hierarchyMap = meshHierarchyCache_.at(timeState);
   auto meshIt = hierarchyMap.find(visitMeshName);

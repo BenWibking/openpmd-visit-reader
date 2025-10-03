@@ -131,13 +131,18 @@ protected:
 
   bool doOverrideMeshAxisOrder_{false};
   bool doOverrideParticleAxisOrder_{false};
+  bool doOverrideMeshDataOrder_{false};
   std::vector<std::string> overrideMeshAxisLabels_;
   std::vector<std::string> overrideParticleAxisLabels_;
+  openPMD::Mesh::DataOrder overrideMeshDataOrder_{openPMD::Mesh::DataOrder::C};
 
   void PopulateDatabaseMetaData(avtDatabaseMetaData *, int) override;
   virtual void *GetAuxiliaryData(const char *var, int timestep, int domain,
                                  const char *type, void *args,
                                  DestructorFunction &) override;
+  void EnsureHierarchyInitialized(int timeState);
+  void PopulateHierarchyCache(openPMD::Iteration const &iteration,
+                              int timeState, avtDatabaseMetaData *md);
   void BuildFieldHierarchy(avtDatabaseMetaData *md, openPMD::Iteration const &i,
                            int timeState);
   void BuildParticleMetaData(avtDatabaseMetaData *md,
@@ -176,6 +181,9 @@ protected:
   GetGeometryXYZ(openPMD::Mesh const &mesh,
                  openPMD::MeshRecordComponent const *representative = nullptr,
                  bool insertMissingAxes = true);
+
+  openPMD::Mesh::DataOrder
+  GetEffectiveMeshDataOrder(openPMD::Mesh const &mesh) const;
 
   std::vector<int>
   GetAxisTranspose(std::vector<std::string> const &axisLabelsSrc,
@@ -299,21 +307,6 @@ void avtopenpmdFileFormat::RemapChunkToVTKLayout(T *data_ptr, size_t nelem,
     return;
   }
 
-  std::array<size_t, 3> vtkDims{1, 1, 1};
-  for (size_t axis = 0; axis < std::min<size_t>(3, patch.extent.size()); ++axis) {
-    vtkDims[axis] = static_cast<size_t>(patch.extent[axis] == 0 ? 1 : patch.extent[axis]);
-  }
-  size_t expectedCount = vtkDims[0] * vtkDims[1] * vtkDims[2];
-  if (expectedCount != nelem) {
-    expectedCount = 1;
-    for (auto dim : patch.extent) {
-      expectedCount *= static_cast<size_t>(dim == 0 ? 1 : dim);
-    }
-    if (expectedCount != nelem) {
-      return;
-    }
-  }
-
   std::vector<size_t> storageDimSizes(rank, 1);
   for (size_t idx = 0; idx < rank; ++idx) {
     storageDimSizes[idx] = static_cast<size_t>(storageDims[idx] == 0 ? 1 : storageDims[idx]);
@@ -323,8 +316,28 @@ void avtopenpmdFileFormat::RemapChunkToVTKLayout(T *data_ptr, size_t nelem,
   for (auto dim : storageDimSizes) {
     storageCount *= dim;
   }
-  if (storageCount != nelem) {
+  if (storageCount == 0) {
     return;
+  }
+  storageCount = std::min(storageCount, nelem);
+
+  std::array<size_t, 3> vtkDims{1, 1, 1};
+  for (size_t axis = 0; axis < std::min<size_t>(3, patch.extent.size()); ++axis) {
+    vtkDims[axis] = static_cast<size_t>(patch.extent[axis] == 0 ? 1 : patch.extent[axis]);
+  }
+
+  std::array<size_t, 3> validMax{1, 1, 1};
+  for (int axis = 0; axis < 3; ++axis) {
+    int storageIndex = storageToVtk[axis];
+    size_t dimValue = vtkDims[axis];
+    if (storageIndex >= 0 &&
+        storageIndex < static_cast<int>(storageDimSizes.size())) {
+      dimValue = storageDimSizes[static_cast<size_t>(storageIndex)];
+    }
+    if (dimValue == 0) {
+      dimValue = 1;
+    }
+    validMax[static_cast<size_t>(axis)] = dimValue;
   }
 
   std::vector<size_t> storageStrides(rank, 1);
@@ -341,15 +354,24 @@ void avtopenpmdFileFormat::RemapChunkToVTKLayout(T *data_ptr, size_t nelem,
     }
   }
 
-  std::vector<T> copy(data_ptr, data_ptr + nelem);
+  std::vector<T> copy(data_ptr, data_ptr + storageCount);
   std::vector<size_t> coordsStorage(rank, 0);
   std::array<size_t, 3> coordsVtk{0, 0, 0};
 
   for (size_t z = 0; z < vtkDims[2]; ++z) {
+    if (z >= validMax[2]) {
+      continue;
+    }
     coordsVtk[2] = z;
     for (size_t y = 0; y < vtkDims[1]; ++y) {
+      if (y >= validMax[1]) {
+        continue;
+      }
       coordsVtk[1] = y;
       for (size_t x = 0; x < vtkDims[0]; ++x) {
+        if (x >= validMax[0]) {
+          continue;
+        }
         coordsVtk[0] = x;
         std::fill(coordsStorage.begin(), coordsStorage.end(), 0);
         for (size_t axis = 0; axis < 3; ++axis) {
@@ -364,6 +386,9 @@ void avtopenpmdFileFormat::RemapChunkToVTKLayout(T *data_ptr, size_t nelem,
         size_t storageIndexLinear = 0;
         for (size_t axis = 0; axis < rank; ++axis) {
           storageIndexLinear += coordsStorage[axis] * storageStrides[axis];
+        }
+        if (storageIndexLinear >= storageCount) {
+          continue;
         }
 
         size_t vtkIndex = x + vtkDims[0] * (y + vtkDims[1] * z);
