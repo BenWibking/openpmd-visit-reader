@@ -27,9 +27,11 @@
 #include <unistd.h>
 
 #include <avtDatabaseMetaData.h>
+#include <vtkCellData.h>
 #include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
 #include <vtkRectilinearGrid.h>
+#include <vtkUnsignedCharArray.h>
 
 #include <openPMD/openPMD.hpp>
 
@@ -40,6 +42,7 @@
 #include <Expression.h>
 #include <InvalidVariableException.h>
 #include <InvalidFilesException.h>
+#include <avtGhostData.h>
 
 #include "avtopenpmdFileFormat.h"
 
@@ -542,6 +545,8 @@ void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
     meshMd->groupTitle = "levels";
     meshMd->groupPieceName = "level";
     meshMd->blockNames = hierarchy.blockNames;
+    meshMd->containsGhostZones = AVT_HAS_GHOSTS;
+    meshMd->presentGhostZoneTypes = (1 << AVT_NESTING_GHOST_ZONES);
     md->Add(meshMd);
     md->AddGroupInformation(hierarchy.numLevels,
                             static_cast<int>(hierarchy.patches.size()),
@@ -1174,6 +1179,11 @@ avtopenpmdFileFormat::BuildDomainNesting(
 
     nesting->SetNestingForDomain(static_cast<int>(patchIdx), levelIndex,
                                  children, logicalExtents);
+
+    debug5 << "[openpmd-api-plugin] Nesting domain=" << patchIdx
+           << " level=" << levelIndex << " children="
+           << JoinContainer(children) << " logicalExtents="
+           << JoinContainer(logicalExtents) << '\n';
   }
 
   debug1 << "[openpmd-api-plugin] BuildDomainNesting completed\n";
@@ -1280,6 +1290,151 @@ avtopenpmdFileFormat::BuildDomainBoundaryList(
 
   return list;
 
+}
+
+void avtopenpmdFileFormat::AddGhostZonesForPatch(
+    const MeshPatchHierarchy &hierarchy, int patchIdx,
+    vtkRectilinearGrid *grid) const {
+  if (grid == nullptr) {
+    return;
+  }
+
+  if (patchIdx < 0 || patchIdx >= static_cast<int>(hierarchy.patches.size())) {
+    return;
+  }
+
+  const PatchInfo &patch = hierarchy.patches[patchIdx];
+  if (patch.centering != AVT_ZONECENT) {
+    return;
+  }
+
+  const int levelIndex = hierarchy.levelIdsPerPatch[patchIdx];
+  if (levelIndex + 1 >= hierarchy.numLevels) {
+    return;
+  }
+
+  const auto &candidateChildren = hierarchy.patchesPerLevel[levelIndex + 1];
+  if (candidateChildren.empty()) {
+    return;
+  }
+
+  std::vector<std::array<int, 6>> refinedRanges;
+  refinedRanges.reserve(candidateChildren.size());
+
+  for (int childIdx : candidateChildren) {
+    if (childIdx < 0 ||
+        childIdx >= static_cast<int>(hierarchy.patches.size())) {
+      continue;
+    }
+
+    const PatchInfo &child = hierarchy.patches[childIdx];
+    if (!IsChildPatch(patch, child)) {
+      continue;
+    }
+
+    std::array<int, 6> range{0, -1, 0, -1, 0, -1};
+    bool hasOverlap = true;
+
+    for (int axis = 0; axis < 3; ++axis) {
+      const int parentLower = patch.logicalLower[axis];
+      const int parentUpper = patch.logicalUpper[axis];
+
+      const int childLower = child.logicalLower[axis];
+      const int childUpper = child.logicalUpper[axis];
+
+      if (parentUpper < parentLower || childUpper < childLower) {
+        hasOverlap = false;
+        break;
+      }
+
+      const double parentSpacing = std::abs(patch.spacing[axis]);
+      const double childSpacing = std::abs(child.spacing[axis]);
+
+      int refine = 1;
+      if (parentSpacing > 0.0 && childSpacing > 0.0) {
+        refine = std::max(1, static_cast<int>(std::lround(parentSpacing / childSpacing)));
+      }
+
+      int coarseLower = childLower;
+      int coarseUpper = childUpper;
+      if (refine > 1) {
+        coarseLower = childLower / refine;
+        coarseUpper = (childUpper + refine) / refine - 1;
+      }
+
+      int overlapLower = std::max(parentLower, coarseLower);
+      int overlapUpper = std::min(parentUpper, coarseUpper);
+      if (overlapLower > overlapUpper) {
+        hasOverlap = false;
+        break;
+      }
+
+      const int localLower = overlapLower - parentLower;
+      const int localUpper = overlapUpper - parentLower;
+
+      range[axis] = localLower;
+      range[axis + 3] = localUpper;
+    }
+
+    if (hasOverlap) {
+      refinedRanges.push_back(range);
+    }
+  }
+
+  if (refinedRanges.empty()) {
+    return;
+  }
+
+  const int nx = patch.extent.size() > 0
+                     ? static_cast<int>(patch.extent[0])
+                     : 1;
+  const int ny = patch.extent.size() > 1
+                     ? static_cast<int>(patch.extent[1])
+                     : 1;
+  const int nz = patch.extent.size() > 2
+                     ? static_cast<int>(patch.extent[2])
+                     : 1;
+
+  const vtkIdType cellCount = static_cast<vtkIdType>(nx) * ny * nz;
+  if (cellCount <= 0) {
+    return;
+  }
+
+  vtkUnsignedCharArray *ghostArray = vtkUnsignedCharArray::New();
+  ghostArray->SetNumberOfComponents(1);
+  ghostArray->SetNumberOfTuples(cellCount);
+  ghostArray->SetName("avtGhostZones");
+
+  unsigned char *values = ghostArray->GetPointer(0);
+  std::fill(values, values + cellCount, 0);
+
+  for (const auto &range : refinedRanges) {
+    const int x0 = std::max(0, range[0]);
+    const int x1 = std::min(nx - 1, range[3]);
+    const int y0 = std::max(0, range[1]);
+    const int y1 = std::min(ny - 1, range[4]);
+    const int z0 = std::max(0, range[2]);
+    const int z1 = std::min(nz - 1, range[5]);
+
+    if (x0 > x1 || y0 > y1 || z0 > z1) {
+      continue;
+    }
+
+    for (int z = z0; z <= z1; ++z) {
+      for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+          const vtkIdType cellId =
+              x + static_cast<vtkIdType>(nx) *
+                      (y + static_cast<vtkIdType>(ny) * z);
+          avtGhostData::AddGhostZoneType(values[cellId],
+                                         REFINED_ZONE_IN_AMR_GRID);
+        }
+      }
+    }
+  }
+
+  grid->GetCellData()->AddArray(ghostArray);
+  ghostArray->Delete();
 }
 
 vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
@@ -1406,6 +1561,9 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
   LogPatchSummary(patch, ctx.str());
 
   vtkDataSet *grid = CreateRectilinearPatch(patch);
+  if (auto *rect = vtkRectilinearGrid::SafeDownCast(grid)) {
+    AddGhostZonesForPatch(hierarchy, domain, rect);
+  }
   debug1 << "[openpmd-api-plugin] GetMesh success mesh='" << meshName
          << "' domain=" << domain << "\n";
   return grid;

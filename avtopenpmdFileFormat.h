@@ -25,6 +25,8 @@
 #include <avtStructuredDomainNesting.h>
 #include <avtLocalStructuredDomainBoundaries.h>
 
+class vtkRectilinearGrid;
+
 struct GeometryData {
   std::vector<std::string> axisLabels;
   std::vector<uint64_t> extent;
@@ -157,6 +159,8 @@ protected:
   BuildDomainNesting(const MeshPatchHierarchy &hierarchy) const;
   avtLocalStructuredDomainBoundaryList *
   BuildDomainBoundaryList(const MeshPatchHierarchy &hierarchy, int domain) const;
+  void AddGhostZonesForPatch(const MeshPatchHierarchy &hierarchy, int patchIdx,
+                             vtkRectilinearGrid *grid) const;
 
   template <typename T> static void ScaleVarData(T *xyz_ptr, size_t nelem,
                                                  T unitSI);
