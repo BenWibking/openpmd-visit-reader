@@ -25,8 +25,10 @@
 #include <avtTypes.h>
 #include <avtStructuredDomainNesting.h>
 #include <avtLocalStructuredDomainBoundaries.h>
+#include <vtkSmartPointer.h>
 
 class vtkRectilinearGrid;
+class vtkUnstructuredGrid;
 
 struct GeometryData {
   std::vector<std::string> axisLabels;
@@ -83,6 +85,19 @@ struct MeshPatchHierarchy {
   int spatialDim{0};
 };
 
+struct ParticleSpeciesInfo {
+  std::string speciesName;
+  std::string visitMeshName;
+  std::vector<std::string> positionComponents; // ordered as x,y,z for VTK
+  std::vector<std::string> storageAxisLabels;
+  std::vector<int> storageToVtk;
+  std::size_t particleCount{0};
+  int spatialDim{0};
+  bool metadataInitialized{false};
+  bool meshCached{false};
+  vtkSmartPointer<vtkUnstructuredGrid> cachedMesh;
+};
+
 class avtopenpmdFileFormat : public avtMTMDFileFormat {
 public:
   avtopenpmdFileFormat(const char *);
@@ -135,6 +150,8 @@ protected:
       meshMap_; // from VisIt mesh name, get openPMD mesh name AND DatasetType
   std::vector<std::unordered_map<std::string, MeshPatchHierarchy>>
       meshHierarchyCache_; // per timestep
+  std::vector<std::unordered_map<std::string, ParticleSpeciesInfo>>
+      particleCache_; // per timestep, keyed by VisIt mesh name
 
   bool doOverrideMeshAxisOrder_{false};
   bool doOverrideParticleAxisOrder_{false};
@@ -153,7 +170,7 @@ protected:
   void BuildFieldHierarchy(avtDatabaseMetaData *md, openPMD::Iteration const &i,
                            int timeState);
   void BuildParticleMetaData(avtDatabaseMetaData *md,
-                             openPMD::Iteration const &i);
+                             openPMD::Iteration const &i, int timeState);
   std::pair<std::string, int> ParseMeshLevel(std::string const &meshName) const;
   MeshPatchHierarchy CreateHierarchyForGroup(
       const std::string &visitMeshName,
@@ -167,6 +184,16 @@ protected:
                                     const PatchInfo &patch,
                                     const std::vector<std::string> &components)
       const;
+  vtkUnstructuredGrid *EnsureParticleMesh(int timeState,
+                                          const std::string &visitMeshName);
+  vtkUnstructuredGrid *CreateParticleMesh(openPMD::Iteration const &iteration,
+                                          ParticleSpeciesInfo &info) const;
+  vtkDataArray *LoadParticleScalarData(openPMD::Iteration const &iteration,
+                                       const ParticleSpeciesInfo &info,
+                                       const std::string &componentPath) const;
+  vtkDataArray *LoadParticleVectorData(
+      openPMD::Iteration const &iteration, const ParticleSpeciesInfo &info,
+      const std::vector<std::string> &componentPaths) const;
   avtStructuredDomainNesting *
   BuildDomainNesting(const MeshPatchHierarchy &hierarchy) const;
   avtLocalStructuredDomainBoundaryList *

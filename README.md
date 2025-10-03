@@ -6,14 +6,12 @@ Supported:
 * Cartesian geometry
 * AMR meshes
   * Used in [WarpX](https://github.com/ECP-WarpX/WarpX/blob/d79fe71ae810364b02017ef70c82c70f667c8e19/Source/Diagnostics/WarpXOpenPMD.cpp#L1282). Each AMR level is named `*_lvlN`. Each AMR patch is saved as a [separate ADIOS2 chunk](https://github.com/ECP-WarpX/WarpX/blob/d79fe71ae810364b02017ef70c82c70f667c8e19/Source/Diagnostics/WarpXOpenPMD.cpp#L1462) with level-centric patch extents.
-* Cell-centered, scalar variables
+* Cell-centered scalar variables
+* Cell-centered vector variables
+* Particle species (rendered as point meshes with per-particle scalars and vectors)
 
 Buggy:
 * Node-centered variables (see https://github.com/BenWibking/openpmd-visit-reader/issues/1)
-
-Currently unsupported:
-* Particles
-* Vector variables
 
 Unplanned:
 * non-Cartesian geometry
@@ -57,3 +55,4 @@ https://github.com/BenWibking/openpmd-visit-reader/blob/856c967442b6b903f3ddac2f
    ```
 
 2. Load any of the `*.pmd` files in the `example_data/` directory in VisIt (clicking `Open` in the main window). This file extension is associated with OpenPMD files, following the [convention](https://openpmd-api.readthedocs.io/en/latest/analysis/paraview.html#openpmd) used for the Paraview reader plugin.
+3. For datasets that define particle species, select the `<species>_particles` mesh in the `Meshes` pane and plot associated scalars/vectors to confirm coordinate loading and per-particle data lookups.

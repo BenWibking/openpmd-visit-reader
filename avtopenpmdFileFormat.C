@@ -31,7 +31,13 @@
 #include <vtkCellData.h>
 #include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
+#include <vtkCellArray.h>
+#include <vtkCellType.h>
+#include <vtkNew.h>
+#include <vtkPoints.h>
+#include <vtkPointData.h>
 #include <vtkRectilinearGrid.h>
+#include <vtkUnstructuredGrid.h>
 #include <vtkUnsignedCharArray.h>
 
 #include <openPMD/openPMD.hpp>
@@ -145,6 +151,32 @@ inline bool IsChildPatch(const PatchInfo &coarse, const PatchInfo &fine) {
   }
 
   return true;
+}
+
+inline std::pair<std::string, std::string>
+SplitRecordComponentPath(const std::string &path) {
+  auto delimiter = path.find('/');
+  if (delimiter == std::string::npos) {
+    return {path, openPMD::RecordComponent::SCALAR};
+  }
+
+  std::string record = path.substr(0, delimiter);
+  std::string component = path.substr(delimiter + 1);
+  if (component.empty()) {
+    component = openPMD::RecordComponent::SCALAR;
+  }
+  return {record, component};
+}
+
+inline std::size_t ElementCountFromExtent(const openPMD::Extent &extent) {
+  if (extent.empty()) {
+    return 0;
+  }
+  std::size_t count = 1;
+  for (auto dim : extent) {
+    count *= static_cast<std::size_t>(dim == 0 ? 1 : dim);
+  }
+  return count;
 }
 
 template <typename T>
@@ -530,6 +562,7 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   const size_t numTimesteps = series_.snapshots().size();
   iterationIndex_ = std::vector<unsigned long long>(numTimesteps);
   meshHierarchyCache_.resize(numTimesteps);
+  particleCache_.resize(numTimesteps);
 
   // save map from timeState to iteration index
   // NOTE: openPMD's iteration index can be an arbitrary number, and can
@@ -586,6 +619,12 @@ int avtopenpmdFileFormat::GetNTimesteps(void) {
 
 void avtopenpmdFileFormat::FreeUpResources(void) {
   debug1 << "[openpmd-api-plugin] FreeUpResources\n";
+  for (auto &timestepCache : particleCache_) {
+    for (auto &speciesEntry : timestepCache) {
+      speciesEntry.second.cachedMesh = nullptr;
+      speciesEntry.second.meshCached = false;
+    }
+  }
 }
 
 void avtopenpmdFileFormat::PopulateHierarchyCache(
@@ -768,10 +807,195 @@ void avtopenpmdFileFormat::BuildFieldHierarchy(avtDatabaseMetaData *md,
 }
 
 void avtopenpmdFileFormat::BuildParticleMetaData(avtDatabaseMetaData *md,
-                                                 openPMD::Iteration const &i) {
-  debug2 << "[openpmd-api-plugin] Skipping particle metadata population (not yet supported).\n";
-  (void)md;
-  (void)i;
+                                                 openPMD::Iteration const &i,
+                                                 int timeState) {
+  debug1 << "[openpmd-api-plugin] BuildParticleMetaData timeState=" << timeState
+         << " speciesCount=" << i.particles.size() << "\n";
+
+  if (timeState < 0 ||
+      timeState >= static_cast<int>(particleCache_.size())) {
+    debug1 << "[openpmd-api-plugin] BuildParticleMetaData invalid timeState="
+           << timeState << " cacheSize=" << particleCache_.size() << "\n";
+    return;
+  }
+
+  auto &speciesCache = particleCache_.at(timeState);
+  speciesCache.clear();
+
+  for (auto const &speciesEntry : i.particles) {
+    const std::string &speciesName = speciesEntry.first;
+    const std::string visitMeshName = speciesName + "_particles";
+    const openPMD::ParticleSpecies &species = speciesEntry.second;
+
+    ParticleSpeciesInfo info;
+    info.speciesName = speciesName;
+    info.visitMeshName = visitMeshName;
+
+    auto positionIt = species.find("position");
+    if (positionIt != species.end()) {
+      const openPMD::Record &positionRecord = positionIt->second;
+
+      info.positionComponents.clear();
+      info.positionComponents.reserve(positionRecord.size());
+      for (auto const &componentEntry : positionRecord) {
+        info.positionComponents.push_back(componentEntry.first);
+      }
+      if (info.positionComponents.empty() && positionRecord.scalar()) {
+        info.positionComponents.push_back(openPMD::RecordComponent::SCALAR);
+      }
+
+      info.storageAxisLabels = info.positionComponents;
+      info.storageToVtk.assign(info.positionComponents.size(), -1);
+
+      std::vector<std::string> desiredAxisOrder;
+      if (doOverrideParticleAxisOrder_ && !overrideParticleAxisLabels_.empty()) {
+        desiredAxisOrder = overrideParticleAxisLabels_;
+      } else {
+        desiredAxisOrder = {std::string("x"), std::string("y"),
+                            std::string("z")};
+      }
+
+      for (std::size_t storageIdx = 0;
+           storageIdx < info.positionComponents.size(); ++storageIdx) {
+        const std::string &componentName = info.positionComponents[storageIdx];
+
+        int mappedAxis = -1;
+        if (!desiredAxisOrder.empty()) {
+          auto desiredIt = std::find(desiredAxisOrder.begin(),
+                                     desiredAxisOrder.end(), componentName);
+          if (desiredIt != desiredAxisOrder.end()) {
+            mappedAxis =
+                static_cast<int>(std::distance(desiredAxisOrder.begin(), desiredIt));
+          }
+        }
+
+        if (!doOverrideParticleAxisOrder_ && mappedAxis == -1) {
+          std::string lowered = componentName;
+          std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                         [](unsigned char c) { return std::tolower(c); });
+          if (lowered == "x") {
+            mappedAxis = 0;
+          } else if (lowered == "y") {
+            mappedAxis = 1;
+          } else if (lowered == "z") {
+            mappedAxis = 2;
+          }
+        }
+
+        if (mappedAxis >= 0 && mappedAxis < 3) {
+          info.storageToVtk[storageIdx] = mappedAxis;
+        }
+      }
+
+      info.spatialDim = 0;
+      for (int axis : info.storageToVtk) {
+        if (axis >= 0 && axis < 3) {
+          info.spatialDim = std::max(info.spatialDim, axis + 1);
+        }
+      }
+      if (info.spatialDim == 0) {
+        info.spatialDim = static_cast<int>(
+            std::min<std::size_t>(3, info.positionComponents.size()));
+      }
+
+      if (!info.positionComponents.empty()) {
+        std::size_t particleCount = 0;
+        if (info.positionComponents.front() == openPMD::RecordComponent::SCALAR) {
+          particleCount =
+              ElementCountFromExtent(positionRecord.getExtent());
+        } else {
+        const std::string &componentName = info.positionComponents.front();
+        auto compIt = positionRecord.find(componentName);
+        if (compIt != positionRecord.end()) {
+          particleCount = ElementCountFromExtent(compIt->second.getExtent());
+        }
+        }
+        info.particleCount = particleCount;
+      }
+    } else {
+      debug2 << "[openpmd-api-plugin] Particle species '" << speciesName
+             << "' missing position record; treating as empty.\n";
+      info.storageToVtk.clear();
+      info.spatialDim = 0;
+      info.particleCount = 0;
+    }
+
+    info.metadataInitialized = true;
+    speciesCache[visitMeshName] = info;
+
+    meshMap_[visitMeshName] =
+        std::tuple(DatasetType::ParticleSpecies, speciesName);
+
+    if (md != nullptr) {
+      avtMeshMetaData *meshMd = new avtMeshMetaData;
+      meshMd->name = visitMeshName;
+      meshMd->meshType = AVT_POINT_MESH;
+      meshMd->topologicalDimension = 0;
+      meshMd->spatialDimension = std::max(1, info.spatialDim);
+      meshMd->numBlocks = 1;
+      meshMd->blockTitle = "species";
+      meshMd->blockPieceName = "species";
+      meshMd->numGroups = 0;
+      meshMd->blockNames.push_back(speciesName);
+      meshMd->containsGhostZones = AVT_NO_GHOSTS;
+      meshMd->presentGhostZoneTypes = 0;
+      md->Add(meshMd);
+    }
+
+    for (auto const &recordEntry : species) {
+      const std::string &recordName = recordEntry.first;
+      if (recordName == "position") {
+        continue;
+      }
+      const openPMD::Record &record = recordEntry.second;
+
+      if (record.scalar()) {
+        std::string componentPath =
+            recordName + "/" + openPMD::RecordComponent::SCALAR;
+        std::string varName = speciesName + "/" + recordName;
+        varMap_[varName] = std::tuple(visitMeshName, componentPath);
+        if (md != nullptr) {
+          AddScalarVarToMetaData(md, varName, visitMeshName, AVT_NODECENT);
+        }
+        debug2 << "[openpmd-api-plugin] Registered particle scalar '"
+               << varName << "'\n";
+      } else {
+        std::vector<std::string> componentPaths;
+        componentPaths.reserve(record.size());
+        for (auto const &componentEntry : record) {
+          const std::string &componentName = componentEntry.first;
+          std::string componentPath = recordName + "/" + componentName;
+          std::string scalarName = speciesName + "/" + recordName + "/" +
+                                   componentName;
+          componentPaths.push_back(componentPath);
+          varMap_[scalarName] = std::tuple(visitMeshName, componentPath);
+          if (md != nullptr) {
+            AddScalarVarToMetaData(md, scalarName, visitMeshName,
+                                   AVT_NODECENT);
+          }
+          debug2 << "[openpmd-api-plugin] Registered particle component '"
+                 << scalarName << "'\n";
+        }
+
+        if (!componentPaths.empty()) {
+          std::string vectorName = speciesName + "/" + recordName;
+          vectorVarMap_[vectorName] =
+              std::tuple(visitMeshName, componentPaths);
+          if (md != nullptr) {
+            AddVectorVarToMetaData(md, vectorName, visitMeshName,
+                                   AVT_NODECENT,
+                                   static_cast<int>(componentPaths.size()));
+          }
+          debug2 << "[openpmd-api-plugin] Registered particle vector '"
+                 << vectorName << "' components="
+                 << JoinStrings(componentPaths) << "\n";
+        }
+      }
+    }
+  }
+
+  debug1 << "[openpmd-api-plugin] Particle metadata complete timeState="
+         << timeState << " meshes=" << speciesCache.size() << "\n";
 }
 
 // ****************************************************************************
@@ -805,7 +1029,7 @@ void avtopenpmdFileFormat::PopulateDatabaseMetaData(avtDatabaseMetaData *md,
   BuildFieldHierarchy(md, iter, timeState);
 
   // particles are currently unsupported in AMR mode
-  BuildParticleMetaData(md, iter);
+  BuildParticleMetaData(md, iter, timeState);
 
   debug1 << "[openpmd-api-plugin] PopulateDatabaseMetaData complete for"
          << " iteration=" << iterIdx << " meshes=" << meshMap_.size()
@@ -1883,6 +2107,331 @@ vtkDataArray *avtopenpmdFileFormat::LoadVectorPatchData(
   }
 }
 
+vtkUnstructuredGrid *avtopenpmdFileFormat::EnsureParticleMesh(
+    int timeState, const std::string &visitMeshName) {
+  if (timeState < 0 ||
+      timeState >= static_cast<int>(particleCache_.size())) {
+    debug1 << "[openpmd-api-plugin] EnsureParticleMesh invalid timeState="
+           << timeState << " cacheSize=" << particleCache_.size() << "\n";
+    EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+  }
+
+  auto &speciesCache = particleCache_.at(timeState);
+  auto speciesIt = speciesCache.find(visitMeshName);
+  if (speciesIt == speciesCache.end()) {
+    debug1 << "[openpmd-api-plugin] EnsureParticleMesh missing particle cache"
+           << " for mesh '" << visitMeshName << "' timeState=" << timeState
+           << "\n";
+    EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+  }
+
+  ParticleSpeciesInfo &info = speciesIt->second;
+
+  if (info.meshCached && info.cachedMesh != nullptr) {
+    info.cachedMesh->Register(nullptr);
+    return info.cachedMesh;
+  }
+
+  unsigned long long iterIdx = iterationIndex_.at(timeState);
+  debug1 << "[openpmd-api-plugin] EnsureParticleMesh constructing mesh="
+         << visitMeshName << " iteration=" << iterIdx << "\n";
+  openPMD::Iteration iteration = series_.snapshots()[iterIdx];
+
+  vtkUnstructuredGrid *grid = CreateParticleMesh(iteration, info);
+  if (grid == nullptr) {
+    debug1 << "[openpmd-api-plugin] CreateParticleMesh returned nullptr for"
+           << " mesh '" << visitMeshName << "'\n";
+    EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+  }
+
+  info.cachedMesh = grid;
+  info.meshCached = true;
+  grid->Delete();
+  info.cachedMesh->Register(nullptr);
+  return info.cachedMesh;
+}
+
+vtkUnstructuredGrid *avtopenpmdFileFormat::CreateParticleMesh(
+    openPMD::Iteration const &iteration, ParticleSpeciesInfo &info) const {
+  auto speciesIt = iteration.particles.find(info.speciesName);
+  if (speciesIt == iteration.particles.end()) {
+    debug1 << "[openpmd-api-plugin] CreateParticleMesh missing species '"
+           << info.speciesName << "'\n";
+    return nullptr;
+  }
+
+  const openPMD::ParticleSpecies &species = speciesIt->second;
+  auto positionIt = species.find("position");
+  vtkUnstructuredGrid *grid = vtkUnstructuredGrid::New();
+
+  if (positionIt == species.end()) {
+    debug1 << "[openpmd-api-plugin] Species '" << info.speciesName
+           << "' has no position record; returning empty point mesh.\n";
+    vtkNew<vtkPoints> emptyPoints;
+    emptyPoints->SetNumberOfPoints(0);
+    grid->SetPoints(emptyPoints);
+    return grid;
+  }
+
+  const openPMD::Record &positionRecord = positionIt->second;
+
+  std::size_t particleCount = info.particleCount;
+  if (particleCount == 0) {
+    std::size_t inferred =
+        ElementCountFromExtent(positionRecord.getExtent());
+    if (inferred == 0 && !info.positionComponents.empty()) {
+      const std::string &componentName = info.positionComponents.front();
+      if (componentName == openPMD::RecordComponent::SCALAR) {
+        inferred = ElementCountFromExtent(positionRecord.getExtent());
+      } else {
+        auto compIt = positionRecord.find(componentName);
+        if (compIt != positionRecord.end()) {
+          inferred = ElementCountFromExtent(compIt->second.getExtent());
+        }
+      }
+    }
+    particleCount = inferred;
+    info.particleCount = particleCount;
+  }
+
+  vtkNew<vtkPoints> points;
+  points->SetDataTypeToDouble();
+  points->SetNumberOfPoints(static_cast<vtkIdType>(particleCount));
+
+  std::array<std::vector<double>, 3> vtkCoords;
+  for (auto &axis : vtkCoords) {
+    axis.assign(particleCount, 0.0);
+  }
+
+  for (std::size_t storageIdx = 0;
+       storageIdx < info.positionComponents.size(); ++storageIdx) {
+    if (storageIdx >= info.storageToVtk.size()) {
+      continue;
+    }
+    int vtkAxis = info.storageToVtk[storageIdx];
+    if (vtkAxis < 0 || vtkAxis >= 3) {
+      continue;
+    }
+
+    const std::string &componentName = info.positionComponents[storageIdx];
+    openPMD::RecordComponent component = positionRecord;
+    if (componentName != openPMD::RecordComponent::SCALAR) {
+      auto compIt = positionRecord.find(componentName);
+      if (compIt == positionRecord.end()) {
+        debug1 << "[openpmd-api-plugin] CreateParticleMesh component '"
+               << componentName << "' missing for species '"
+               << info.speciesName << "'; skipping axis" << vtkAxis << "\n";
+        continue;
+      }
+      component = compIt->second;
+    }
+
+    openPMD::Extent extent = component.getExtent();
+    if (extent.empty()) {
+      extent = openPMD::Extent(1, static_cast<uint64_t>(particleCount));
+    }
+    openPMD::Offset offset(extent.size(), 0u);
+    std::size_t elementCount = ElementCountFromExtent(extent);
+    if (elementCount == 0) {
+      elementCount = particleCount;
+    }
+
+    if (component.getDatatype() == openPMD::Datatype::DOUBLE) {
+      std::vector<double> buffer(elementCount, 0.0);
+      component.loadChunkRaw(buffer.data(), offset, extent);
+      const_cast<openPMD::Series &>(series_).flush();
+      ScaleVarData<double>(buffer.data(), elementCount,
+                           static_cast<double>(component.unitSI()));
+      std::size_t copyCount =
+          std::min<std::size_t>(buffer.size(), particleCount);
+      std::copy(buffer.begin(), buffer.begin() + copyCount,
+                vtkCoords[vtkAxis].begin());
+    } else if (component.getDatatype() == openPMD::Datatype::FLOAT) {
+      std::vector<float> buffer(elementCount, 0.0f);
+      component.loadChunkRaw(buffer.data(), offset, extent);
+      const_cast<openPMD::Series &>(series_).flush();
+      ScaleVarData<float>(buffer.data(), elementCount,
+                          static_cast<float>(component.unitSI()));
+      std::size_t copyCount =
+          std::min<std::size_t>(buffer.size(), particleCount);
+      for (std::size_t idx = 0; idx < copyCount; ++idx) {
+        vtkCoords[vtkAxis][idx] = static_cast<double>(buffer[idx]);
+      }
+    } else {
+      debug1 << "[openpmd-api-plugin] CreateParticleMesh unsupported" \
+                " datatype="
+             << static_cast<int>(component.getDatatype())
+             << " for component '" << componentName << "'\n";
+    }
+  }
+
+  for (vtkIdType idx = 0; idx < static_cast<vtkIdType>(particleCount); ++idx) {
+    points->SetPoint(idx, vtkCoords[0][idx], vtkCoords[1][idx],
+                     vtkCoords[2][idx]);
+  }
+
+  grid->SetPoints(points);
+  grid->Allocate(static_cast<vtkIdType>(particleCount));
+
+  for (vtkIdType idx = 0; idx < static_cast<vtkIdType>(particleCount); ++idx) {
+    vtkIdType pid = idx;
+    grid->InsertNextCell(VTK_VERTEX, 1, &pid);
+  }
+
+  debug1 << "[openpmd-api-plugin] CreateParticleMesh built mesh '"
+         << info.visitMeshName << "' particles=" << particleCount << "\n";
+  return grid;
+}
+
+vtkDataArray *avtopenpmdFileFormat::LoadParticleScalarData(
+    openPMD::Iteration const &iteration, const ParticleSpeciesInfo &info,
+    const std::string &componentPath) const {
+  auto speciesIt = iteration.particles.find(info.speciesName);
+  if (speciesIt == iteration.particles.end()) {
+    debug1 << "[openpmd-api-plugin] LoadParticleScalarData missing species '"
+           << info.speciesName << "'\n";
+    EXCEPTION1(InvalidVariableException, info.speciesName.c_str());
+  }
+
+  const openPMD::ParticleSpecies &species = speciesIt->second;
+  auto [recordName, componentName] = SplitRecordComponentPath(componentPath);
+  auto recordIt = species.find(recordName);
+  if (recordIt == species.end()) {
+    debug1 << "[openpmd-api-plugin] LoadParticleScalarData missing record '"
+           << recordName << "' for species '" << info.speciesName << "'\n";
+    EXCEPTION1(InvalidVariableException, recordName.c_str());
+  }
+
+  const openPMD::Record &record = recordIt->second;
+  openPMD::RecordComponent rcomp = record;
+  if (componentName != openPMD::RecordComponent::SCALAR) {
+    auto componentIt = record.find(componentName);
+    if (componentIt == record.end()) {
+      debug1 << "[openpmd-api-plugin] LoadParticleScalarData missing component '"
+             << componentName << "' for record '" << recordName << "'\n";
+      EXCEPTION1(InvalidVariableException, componentName.c_str());
+    }
+    rcomp = componentIt->second;
+  }
+
+  openPMD::Extent extent = rcomp.getExtent();
+  if (extent.empty()) {
+    extent = openPMD::Extent(1, static_cast<uint64_t>(info.particleCount));
+  }
+  openPMD::Offset offset(extent.size(), 0u);
+  std::size_t elementCount = ElementCountFromExtent(extent);
+  if (elementCount == 0) {
+    elementCount = info.particleCount;
+  }
+
+  vtkDataArray *result = nullptr;
+
+  if (rcomp.getDatatype() == openPMD::Datatype::DOUBLE) {
+    vtkDoubleArray *data = vtkDoubleArray::New();
+    data->SetNumberOfComponents(1);
+    data->SetNumberOfTuples(static_cast<vtkIdType>(elementCount));
+    double *buffer = data->GetPointer(0);
+    rcomp.loadChunkRaw(buffer, offset, extent);
+    const_cast<openPMD::Series &>(series_).flush();
+    ScaleVarData<double>(buffer, elementCount,
+                         static_cast<double>(rcomp.unitSI()));
+    result = data;
+  } else if (rcomp.getDatatype() == openPMD::Datatype::FLOAT) {
+    vtkFloatArray *data = vtkFloatArray::New();
+    data->SetNumberOfComponents(1);
+    data->SetNumberOfTuples(static_cast<vtkIdType>(elementCount));
+    float *buffer = data->GetPointer(0);
+    rcomp.loadChunkRaw(buffer, offset, extent);
+    const_cast<openPMD::Series &>(series_).flush();
+    ScaleVarData<float>(buffer, elementCount,
+                        static_cast<float>(rcomp.unitSI()));
+    result = data;
+  } else {
+    debug1 << "[openpmd-api-plugin] LoadParticleScalarData unsupported datatype"
+           << "=" << static_cast<int>(rcomp.getDatatype()) << "\n";
+  }
+
+  if (result == nullptr) {
+    EXCEPTION1(InvalidVariableException, componentPath.c_str());
+  }
+
+  debug1 << "[openpmd-api-plugin] LoadParticleScalarData record='" << recordName
+         << "' component='" << componentName
+         << "' tuples=" << result->GetNumberOfTuples() << "\n";
+  return result;
+}
+
+vtkDataArray *avtopenpmdFileFormat::LoadParticleVectorData(
+    openPMD::Iteration const &iteration, const ParticleSpeciesInfo &info,
+    const std::vector<std::string> &componentPaths) const {
+  if (componentPaths.empty()) {
+    EXCEPTION1(InvalidVariableException, info.speciesName.c_str());
+  }
+
+  std::vector<vtkDataArray *> components;
+  components.reserve(componentPaths.size());
+
+  try {
+    for (auto const &componentPath : componentPaths) {
+      vtkDataArray *component =
+          LoadParticleScalarData(iteration, info, componentPath);
+      components.push_back(component);
+    }
+
+    vtkIdType tupleCount = components.front()->GetNumberOfTuples();
+    bool hasDouble = false;
+    bool hasFloat = false;
+    for (vtkDataArray *component : components) {
+      if (vtkDoubleArray::SafeDownCast(component) != nullptr) {
+        hasDouble = true;
+      }
+      if (vtkFloatArray::SafeDownCast(component) != nullptr) {
+        hasFloat = true;
+      }
+    }
+
+    vtkDataArray *result = nullptr;
+    if (hasDouble || !hasFloat) {
+      auto *vec = vtkDoubleArray::New();
+      vec->SetNumberOfComponents(static_cast<int>(components.size()));
+      vec->SetNumberOfTuples(tupleCount);
+      for (std::size_t compIdx = 0; compIdx < components.size(); ++compIdx) {
+        vtkDataArray *component = components[compIdx];
+        for (vtkIdType tupleIdx = 0; tupleIdx < tupleCount; ++tupleIdx) {
+          vec->SetComponent(tupleIdx, static_cast<int>(compIdx),
+                            component->GetComponent(tupleIdx, 0));
+        }
+      }
+      result = vec;
+    } else {
+      auto *vec = vtkFloatArray::New();
+      vec->SetNumberOfComponents(static_cast<int>(components.size()));
+      vec->SetNumberOfTuples(tupleCount);
+      for (std::size_t compIdx = 0; compIdx < components.size(); ++compIdx) {
+        vtkDataArray *component = components[compIdx];
+        for (vtkIdType tupleIdx = 0; tupleIdx < tupleCount; ++tupleIdx) {
+          vec->SetComponent(tupleIdx, static_cast<int>(compIdx),
+                            component->GetComponent(tupleIdx, 0));
+        }
+      }
+      result = vec;
+    }
+
+    for (vtkDataArray *component : components) {
+      component->Delete();
+    }
+
+    debug1 << "[openpmd-api-plugin] LoadParticleVectorData components="
+           << componentPaths.size() << " tuples=" << tupleCount << "\n";
+    return result;
+  } catch (...) {
+    for (vtkDataArray *component : components) {
+      component->Delete();
+    }
+    throw;
+  }
+}
+
 vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
                                           const char *visit_meshname) {
   const char *meshName = visit_meshname != nullptr ? visit_meshname : "<null>";
@@ -1892,6 +2441,20 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
   if (visit_meshname == nullptr) {
     debug1 << "[openpmd-api-plugin] GetMesh received null mesh name\n";
     EXCEPTION1(InvalidVariableException, meshName);
+  }
+
+  auto meshTypeIt = meshMap_.find(visit_meshname);
+  if (meshTypeIt != meshMap_.end() &&
+      std::get<0>(meshTypeIt->second) == DatasetType::ParticleSpecies) {
+    vtkUnstructuredGrid *grid = EnsureParticleMesh(timeState, visit_meshname);
+    if (grid == nullptr) {
+      debug1 << "[openpmd-api-plugin] GetMesh failed to build particle mesh '"
+             << meshName << "'\n";
+      EXCEPTION1(InvalidVariableException, visit_meshname);
+    }
+    debug1 << "[openpmd-api-plugin] GetMesh success (particle) mesh='"
+           << meshName << "'\n";
+    return grid;
   }
 
   EnsureHierarchyInitialized(timeState);
@@ -2149,6 +2712,40 @@ vtkDataArray *avtopenpmdFileFormat::GetVar(int timeState, int domain,
   const std::string &visitMeshName = std::get<0>(varIt->second);
   const std::string &component = std::get<1>(varIt->second);
 
+  auto meshTypeIt = meshMap_.find(visitMeshName);
+  if (meshTypeIt != meshMap_.end() &&
+      std::get<0>(meshTypeIt->second) == DatasetType::ParticleSpecies) {
+    if (timeState < 0 ||
+        timeState >= static_cast<int>(particleCache_.size())) {
+      debug1 << "[openpmd-api-plugin] GetVar particle cache timeState invalid"
+             << " timeState=" << timeState
+             << " cacheSize=" << particleCache_.size() << "\n";
+      EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+    }
+
+    auto &speciesCache = particleCache_.at(timeState);
+    auto speciesIt = speciesCache.find(visitMeshName);
+    if (speciesIt == speciesCache.end()) {
+      debug1 << "[openpmd-api-plugin] GetVar missing particle metadata for mesh"
+             << " '" << visitMeshName << "'\n";
+      EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+    }
+
+    unsigned long long iter = iterationIndex_.at(timeState);
+    openPMD::Iteration iteration = series_.snapshots()[iter];
+    vtkDataArray *data =
+        LoadParticleScalarData(iteration, speciesIt->second, component);
+    if (data == nullptr) {
+      debug1 << "[openpmd-api-plugin] GetVar particle loader returned nullptr"
+             << " var='" << requestedVar << "'\n";
+      EXCEPTION1(InvalidVariableException, varname);
+    }
+
+    debug1 << "[openpmd-api-plugin] GetVar success (particle) var='"
+           << requestedVar << "'\n";
+    return data;
+  }
+
   EnsureHierarchyInitialized(timeState);
 
   auto &hierarchyMap = meshHierarchyCache_.at(timeState);
@@ -2227,6 +2824,40 @@ vtkDataArray *avtopenpmdFileFormat::GetVectorVar(int timeState, int domain,
 
   const std::string &visitMeshName = std::get<0>(varIt->second);
   const std::vector<std::string> &components = std::get<1>(varIt->second);
+
+  auto meshTypeIt = meshMap_.find(visitMeshName);
+  if (meshTypeIt != meshMap_.end() &&
+      std::get<0>(meshTypeIt->second) == DatasetType::ParticleSpecies) {
+    if (timeState < 0 ||
+        timeState >= static_cast<int>(particleCache_.size())) {
+      debug1 << "[openpmd-api-plugin] GetVectorVar particle cache timeState"
+             << " invalid timeState=" << timeState
+             << " cacheSize=" << particleCache_.size() << "\n";
+      EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+    }
+
+    auto &speciesCache = particleCache_.at(timeState);
+    auto speciesIt = speciesCache.find(visitMeshName);
+    if (speciesIt == speciesCache.end()) {
+      debug1 << "[openpmd-api-plugin] GetVectorVar missing particle metadata"
+             << " for mesh '" << visitMeshName << "'\n";
+      EXCEPTION1(InvalidVariableException, visitMeshName.c_str());
+    }
+
+    unsigned long long iter = iterationIndex_.at(timeState);
+    openPMD::Iteration iteration = series_.snapshots()[iter];
+    vtkDataArray *data = LoadParticleVectorData(iteration, speciesIt->second,
+                                                components);
+    if (data == nullptr) {
+      debug1 << "[openpmd-api-plugin] GetVectorVar particle loader returned"
+             << " nullptr var='" << requestedVar << "'\n";
+      EXCEPTION1(InvalidVariableException, varname);
+    }
+
+    debug1 << "[openpmd-api-plugin] GetVectorVar success (particle) var='"
+           << requestedVar << "'\n";
+    return data;
+  }
 
   EnsureHierarchyInitialized(timeState);
 
