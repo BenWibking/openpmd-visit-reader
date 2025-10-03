@@ -10,6 +10,7 @@
 #define AVT_openpmd_FILE_FORMAT_H
 
 #include <array>
+#include <cmath>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -20,14 +21,15 @@
 #include <DebugStream.h>
 #include <avtMTMDFileFormat.h>
 #include <avtTypes.h>
-#include <avtStructuredDomainBoundaries.h>
 #include <avtStructuredDomainNesting.h>
+#include <avtLocalStructuredDomainBoundaries.h>
 
 struct GeometryData {
   std::vector<std::string> axisLabels;
   std::vector<uint64_t> extent;
   std::vector<double> gridSpacing;
   std::vector<double> gridOrigin;
+  std::vector<double> position;
 };
 
 // ****************************************************************************
@@ -152,19 +154,23 @@ protected:
       const;
   avtStructuredDomainNesting *
   BuildDomainNesting(const MeshPatchHierarchy &hierarchy) const;
-  avtStructuredDomainBoundaries *
-  BuildDomainBoundaries(const MeshPatchHierarchy &hierarchy) const;
+  avtLocalStructuredDomainBoundaryList *
+  BuildDomainBoundaryList(const MeshPatchHierarchy &hierarchy, int domain) const;
 
   template <typename T> static void ScaleVarData(T *xyz_ptr, size_t nelem,
                                                  T unitSI);
 
   template <typename T> avtCentering GetCenteringType(T const &mesh);
 
-  GeometryData GetGeometry3D(openPMD::Mesh const &mesh,
-                             bool insertMissingAxes = true);
+  GeometryData
+  GetGeometry3D(openPMD::Mesh const &mesh,
+                openPMD::MeshRecordComponent const *representative = nullptr,
+                bool insertMissingAxes = true);
 
-  GeometryData GetGeometryXYZ(openPMD::Mesh const &mesh,
-                              bool insertMissingAxes = true);
+  GeometryData
+  GetGeometryXYZ(openPMD::Mesh const &mesh,
+                 openPMD::MeshRecordComponent const *representative = nullptr,
+                 bool insertMissingAxes = true);
 
   std::vector<int>
   GetAxisTranspose(std::vector<std::string> const &axisLabelsSrc,
@@ -191,25 +197,27 @@ avtCentering avtopenpmdFileFormat::GetCenteringType(T const &mesh) {
     return AVT_UNKNOWN_CENT;
   }
 
-  // cell-centered == {0.5, 0.5, 0.5}
-  bool isCellCentered = true;
-  for (int idim = 0; idim < centering.size(); idim++) {
-    isCellCentered = (isCellCentered && (centering[idim] == 0.5));
+  if (centering.empty()) {
+    debug5 << "[openpmd-api-plugin] Mesh centering metadata empty.\n";
+    return AVT_UNKNOWN_CENT;
   }
 
-  // node-centered == {0, 0, 0}
-  bool isNodeCentered = true;
-  for (int idim = 0; idim < centering.size(); idim++) {
-    isNodeCentered = (isNodeCentered && (centering[idim] == 0.));
-  }
+  auto isApproximately = [&](float expected) {
+    for (float value : centering) {
+      if (std::abs(value - expected) > 1e-5f) {
+        return false;
+      }
+    }
+    return true;
+  };
 
-  if (isCellCentered) {
-    debug5 << "[openpmd-api-plugin] "
-           << "Mesh is cell-centered.\n";
+  if (isApproximately(0.5f)) {
+    debug5 << "[openpmd-api-plugin] Mesh is cell-centered.\n";
     return AVT_ZONECENT;
-  } else if (isNodeCentered) {
-    debug5 << "[openpmd-api-plugin] "
-           << "Mesh is node-centered.\n";
+  }
+
+  if (isApproximately(0.0f)) {
+    debug5 << "[openpmd-api-plugin] Mesh is node-centered.\n";
     return AVT_NODECENT;
   }
 

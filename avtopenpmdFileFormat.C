@@ -205,10 +205,6 @@ void DeleteStructuredDomainNesting(void *ptr) {
   delete static_cast<avtStructuredDomainNesting *>(ptr);
 }
 
-void DeleteStructuredDomainBoundaries(void *ptr) {
-  delete static_cast<avtStructuredDomainBoundaries *>(ptr);
-}
-
 template <typename Container>
 inline std::string JoinContainer(const Container &values) {
   std::ostringstream oss;
@@ -659,18 +655,28 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
     }
 
     if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
-      debug2 << "[openpmd-api-plugin] Building domain boundaries for mesh '"
-             << meshName << "'\n";
-      avtStructuredDomainBoundaries *boundaries =
-          BuildDomainBoundaries(hierarchy);
-      if (boundaries == nullptr) {
+      if (domain == -1) {
+        debug1 << "[openpmd-api-plugin] Global boundary request not supported, returning null\n";
+        return NULL;
+      }
+      if (domain < 0 ||
+          domain >= static_cast<int>(hierarchy.patches.size())) {
+        debug1 << "[openpmd-api-plugin] Auxiliary request invalid domain "
+               << domain << " for mesh '" << meshName << "'\n";
+        return NULL;
+      }
+      debug2 << "[openpmd-api-plugin] Building domain boundary list for mesh '"
+             << meshName << "' domain=" << domain << "\n";
+      avtLocalStructuredDomainBoundaryList *boundaryList =
+          BuildDomainBoundaryList(hierarchy, domain);
+      if (boundaryList == nullptr) {
         debug1 << "[openpmd-api-plugin] Domain boundary build returned nullptr\n";
         return NULL;
       }
-      df = DeleteStructuredDomainBoundaries;
-      debug1 << "[openpmd-api-plugin] Domain boundaries ready for mesh '"
-             << meshName << "'\n";
-      return boundaries;
+      df = avtLocalStructuredDomainBoundaryList::Destruct;
+      debug1 << "[openpmd-api-plugin] Domain boundary list ready for mesh '"
+             << meshName << "' domain=" << domain << "\n";
+      return boundaryList;
     }
   }
 
@@ -739,7 +745,12 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
   // Determine representative mesh to extract dimensional information.
   const std::string &representativeMeshName = levels.front().second;
   openPMD::Mesh representativeMesh = iter.meshes.at(representativeMeshName);
-  GeometryData repGeom = GetGeometryXYZ(representativeMesh, true);
+  openPMD::MeshRecordComponent representativeComponentForGeom =
+      representativeMesh.scalar()
+          ? representativeMesh[openPMD::MeshRecordComponent::SCALAR]
+          : representativeMesh.begin()->second;
+  GeometryData repGeom =
+      GetGeometryXYZ(representativeMesh, &representativeComponentForGeom, true);
   int topoDim = 0;
   for (auto extent : repGeom.extent) {
     if (extent > 1) {
@@ -781,14 +792,14 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
     debug5 << "[openpmd-api-plugin]   processing mesh='" << meshName
            << "' level=" << levelValue << "\n";
     openPMD::Mesh mesh = iter.meshes.at(meshName);
-    GeometryData geom = GetGeometryXYZ(mesh, true);
-    double unitSI = mesh.gridUnitSI();
-    avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
-
     // Determine a representative record component for chunk enumeration.
     auto representativeComponent = mesh.scalar()
                                       ? mesh[openPMD::MeshRecordComponent::SCALAR]
                                       : mesh.begin()->second;
+
+    GeometryData geom = GetGeometryXYZ(mesh, &representativeComponent, true);
+    double unitSI = mesh.gridUnitSI();
+    avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
 
     openPMD::ChunkTable chunks = representativeComponent.availableChunks();
     debug5 << "[openpmd-api-plugin]     chunks available=" << chunks.size()
@@ -823,13 +834,19 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
     const int groupId = levelToGroupId[levelValue];
     hierarchy.levelCellSizes[groupId] = spacingPerAxis;
 
+    avtCentering chunkCentering = cent;
+    if (chunkCentering == AVT_UNKNOWN_CENT) {
+      chunkCentering =
+          GetCenteringType<openPMD::MeshRecordComponent>(representativeComponent);
+    }
+
     for (auto const &chunk : chunks) {
       PatchInfo patch;
       patch.level = levelValue;
       patch.meshName = meshName;
       patch.offset = chunk.offset;
       patch.extent = chunk.extent;
-      patch.centering = cent;
+      patch.centering = chunkCentering;
 
       for (int axis = 0; axis < 3; ++axis) {
         double spacing = spacingPerAxis[axis];
@@ -842,8 +859,14 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
 
         double originValue = getValueOr(geom.gridOrigin, axis, 0.0);
         double gridOrigin = unitSI * originValue;
-        patch.origin[axis] =
-            gridOrigin + static_cast<double>(offsetValue) * spacing;
+        double positionValue = getValueOr(geom.position, axis, 0.0);
+
+        double logicalIndex = static_cast<double>(offsetValue) + positionValue;
+        if (patch.centering == AVT_ZONECENT) {
+          logicalIndex -= 0.5;
+        }
+
+        patch.origin[axis] = gridOrigin + logicalIndex * spacing;
       }
 
       ComputeLogicalExtents(patch);
@@ -1002,56 +1025,106 @@ avtopenpmdFileFormat::BuildDomainNesting(
   return nesting;
 }
 
-avtStructuredDomainBoundaries *
-avtopenpmdFileFormat::BuildDomainBoundaries(
-    const MeshPatchHierarchy &hierarchy) const {
+avtLocalStructuredDomainBoundaryList *
+avtopenpmdFileFormat::BuildDomainBoundaryList(
+    const MeshPatchHierarchy &hierarchy, int domain) const {
   if (hierarchy.patches.empty()) {
-    debug1 << "[openpmd-api-plugin] BuildDomainBoundaries received empty hierarchy\n";
     return nullptr;
   }
 
-  debug1 << "[openpmd-api-plugin] BuildDomainBoundaries patches="
-         << hierarchy.patches.size() << " levels=" << hierarchy.numLevels
-         << "\n";
-
-  bool canComputeNeighbors = true;
-  auto *boundaries =
-      new avtRectilinearDomainBoundaries(canComputeNeighbors);
-  boundaries->SetNumDomains(static_cast<int>(hierarchy.patches.size()));
-
-  if (hierarchy.numLevels > 1) {
-    std::vector<int> refinement(hierarchy.numLevels - 1, 1);
-    for (int level = 1; level < hierarchy.numLevels; ++level) {
-      if (level - 1 < static_cast<int>(hierarchy.levelRefinementRatios.size())) {
-        refinement[level - 1] = hierarchy.levelRefinementRatios[level - 1][0];
-      }
-    }
-    boundaries->SetRefinementRatios(refinement);
+  if (domain < 0 || domain >= static_cast<int>(hierarchy.patches.size())) {
+    return nullptr;
   }
 
-  for (size_t patchIdx = 0; patchIdx < hierarchy.patches.size(); ++patchIdx) {
-    const PatchInfo &patch = hierarchy.patches[patchIdx];
-    const int levelIndex = hierarchy.levelIdsPerPatch[patchIdx];
+  const PatchInfo &patch = hierarchy.patches[domain];
+  LogPatchSummary(patch, "BuildDomainBoundaryList patch");
 
-    if (patchIdx == 0) {
-      LogPatchSummary(patch, "BuildDomainBoundaries reference patch");
+  int extents[6] = {0, 0, 0, 0, 0, 0};
+  for (int axis = 0; axis < 3; ++axis) {
+    extents[2 * axis] = patch.logicalLower[axis];
+    extents[2 * axis + 1] = patch.logicalUpper[axis];
+  }
+
+  auto *list = new avtLocalStructuredDomainBoundaryList(domain, extents);
+
+  auto rangesOverlap = [](int a0, int a1, int b0, int b1) {
+    return std::max(a0, b0) <= std::min(a1, b1);
+  };
+
+  for (size_t otherIdx = 0; otherIdx < hierarchy.patches.size(); ++otherIdx) {
+    if (static_cast<int>(otherIdx) == domain) {
+      continue;
     }
 
-    int extents[6] = {0, 1, 0, 1, 0, 1};
+    const PatchInfo &other = hierarchy.patches[otherIdx];
+
+    int touchAxis = -1;
+    int orientation[3] = {0, 0, 0};
+
     for (int axis = 0; axis < 3; ++axis) {
-      if (axis < hierarchy.spatialDim) {
-        extents[2 * axis] = patch.logicalLower[axis];
-        extents[2 * axis + 1] = patch.logicalUpper[axis] + 1;
+      bool overlapsOtherDims = true;
+      for (int otherAxis = 0; otherAxis < 3; ++otherAxis) {
+        if (otherAxis == axis) {
+          continue;
+        }
+        if (!rangesOverlap(patch.logicalLower[otherAxis], patch.logicalUpper[otherAxis],
+                           other.logicalLower[otherAxis], other.logicalUpper[otherAxis])) {
+          overlapsOtherDims = false;
+          break;
+        }
+      }
+
+      if (!overlapsOtherDims) {
+        continue;
+      }
+
+      if (patch.logicalUpper[axis] + 1 == other.logicalLower[axis]) {
+        if (touchAxis != -1) {
+          touchAxis = -2;
+          break;
+        }
+        touchAxis = axis;
+        orientation[axis] = 1;
+      } else if (other.logicalUpper[axis] + 1 == patch.logicalLower[axis]) {
+        if (touchAxis != -1) {
+          touchAxis = -2;
+          break;
+        }
+        touchAxis = axis;
+        orientation[axis] = -1;
       }
     }
 
-    boundaries->SetIndicesForAMRPatch(static_cast<int>(patchIdx), levelIndex,
-                                      extents);
+    if (touchAxis == -1) {
+      continue;
+    }
+    if (touchAxis == -2) {
+      continue;
+    }
+
+    int boundaryExtents[6] = {0, 0, 0, 0, 0, 0};
+    for (int axis = 0; axis < 3; ++axis) {
+      if (axis == touchAxis) {
+        if (orientation[axis] > 0) {
+          boundaryExtents[2 * axis] = patch.logicalUpper[axis];
+          boundaryExtents[2 * axis + 1] = patch.logicalUpper[axis];
+        } else {
+          boundaryExtents[2 * axis] = patch.logicalLower[axis];
+          boundaryExtents[2 * axis + 1] = patch.logicalLower[axis];
+        }
+      } else {
+        int lower = std::max(patch.logicalLower[axis], other.logicalLower[axis]);
+        int upper = std::min(patch.logicalUpper[axis], other.logicalUpper[axis]);
+        boundaryExtents[2 * axis] = lower;
+        boundaryExtents[2 * axis + 1] = upper;
+      }
+    }
+
+    list->AddNeighbor(static_cast<int>(otherIdx), static_cast<int>(domain), orientation, boundaryExtents);
   }
 
-  boundaries->CalculateBoundaries();
-  debug1 << "[openpmd-api-plugin] BuildDomainBoundaries completed\n";
-  return boundaries;
+  return list;
+
 }
 
 vtkDataArray *avtopenpmdFileFormat::LoadScalarPatchData(
@@ -1173,8 +1246,10 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
   return grid;
 }
 
-GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh,
-                                                 bool insertMissingAxes) {
+GeometryData avtopenpmdFileFormat::GetGeometry3D(
+    openPMD::Mesh const &mesh,
+    openPMD::MeshRecordComponent const *representative,
+    bool insertMissingAxes) {
   // get dataOrder
   auto dataOrder = mesh.dataOrder();
 
@@ -1209,12 +1284,33 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh,
   // get grid origin
   std::vector<double> gridOrigin = mesh.gridGlobalOffset();
 
+  std::vector<double> position;
+  bool havePosition = false;
+  try {
+    position = mesh.position<double>();
+    havePosition = !position.empty();
+  } catch (openPMD::Error const &) {
+    position.clear();
+  }
+  if (!havePosition && representative != nullptr) {
+    try {
+      position = representative->position<double>();
+      havePosition = !position.empty();
+    } catch (openPMD::Error const &) {
+      position.clear();
+    }
+  }
+  if (!havePosition) {
+    position.assign(axisLabels.size(), 0.0);
+  }
+
   // reverse ordering if mesh.DataOrder() == DataOrder::F
   if (dataOrder == openPMD::Mesh::DataOrder::F) {
     std::reverse(axisLabels.begin(), axisLabels.end());
     std::reverse(extent.begin(), extent.end());
     std::reverse(gridSpacing.begin(), gridSpacing.end());
     std::reverse(gridOrigin.begin(), gridOrigin.end());
+    std::reverse(position.begin(), position.end());
   }
 
   if (insertMissingAxes) {
@@ -1228,6 +1324,7 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh,
         extent.insert(extent.begin(), 1);
         gridSpacing.insert(gridSpacing.begin(), 0);
         gridOrigin.insert(gridOrigin.begin(), 0);
+        position.insert(position.begin(), 0.0);
       }
     }
   }
@@ -1237,17 +1334,24 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(openPMD::Mesh const &mesh,
   geom.extent = extent;
   geom.gridOrigin = gridOrigin;
   geom.gridSpacing = gridSpacing;
+  if (position.size() != axisLabels.size()) {
+    position.resize(axisLabels.size(), 0.0);
+  }
+  geom.position = position;
   debug2 << "[openpmd-api-plugin] GetGeometry3D result axisLabels="
          << JoinStrings(geom.axisLabels) << " extent="
          << JoinContainer(geom.extent) << " spacing="
          << JoinContainer(geom.gridSpacing) << " origin="
-         << JoinContainer(geom.gridOrigin) << "\n";
+         << JoinContainer(geom.gridOrigin) << " position="
+         << JoinContainer(geom.position) << "\n";
   return geom;
 }
 
-GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
-                                                  bool insertMissingAxes) {
-  GeometryData geom = GetGeometry3D(mesh, insertMissingAxes);
+GeometryData avtopenpmdFileFormat::GetGeometryXYZ(
+    openPMD::Mesh const &mesh,
+    openPMD::MeshRecordComponent const *representative,
+    bool insertMissingAxes) {
+  GeometryData geom = GetGeometry3D(mesh, representative, insertMissingAxes);
 
   // compute transposition of axisLabels -> {'x', 'y', 'z'}
   auto axisLabels = geom.axisLabels;
@@ -1269,6 +1373,7 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
   TransposeVector(geom.extent, transpose);
   TransposeVector(geom.gridSpacing, transpose);
   TransposeVector(geom.gridOrigin, transpose);
+  TransposeVector(geom.position, transpose);
 
   // verify we did it right
   assert(geom.axisLabels[0] == std::string("x"));
@@ -1279,7 +1384,8 @@ GeometryData avtopenpmdFileFormat::GetGeometryXYZ(openPMD::Mesh const &mesh,
          << JoinStrings(geom.axisLabels) << " extent="
          << JoinContainer(geom.extent) << " spacing="
          << JoinContainer(geom.gridSpacing) << " origin="
-         << JoinContainer(geom.gridOrigin) << "\n";
+         << JoinContainer(geom.gridOrigin) << " position="
+         << JoinContainer(geom.position) << "\n";
 
   return geom;
 }

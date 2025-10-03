@@ -56,7 +56,7 @@ void avtopenpmdFileFormat::TransposeArray(
     openPMD::Mesh::MeshRecordComponent const &rcomp) {
   /// Transpose data array from input ordering to VTK ordering
 
-  GeometryData geom = GetGeometry3D(mesh, false);
+  GeometryData geom = GetGeometry3D(mesh, nullptr, false);
   auto axisLabels = geom.axisLabels;
   auto input_extent = geom.extent;
 
