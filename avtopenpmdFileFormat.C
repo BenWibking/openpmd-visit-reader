@@ -93,16 +93,53 @@ inline bool IsChildPatch(const PatchInfo &coarse, const PatchInfo &fine) {
   GetPhysicalBounds(coarse, coarseMin, coarseMax);
   GetPhysicalBounds(fine, fineMin, fineMax);
 
+  bool fineStrictlyInside = true;
+  bool boxesOverlap = true;
+  bool hasFinerResolutionAxis = false;
+
   for (int axis = 0; axis < 3; ++axis) {
-    double tol = std::max({std::abs(coarse.spacing[axis]),
-                           std::abs(fine.spacing[axis]), 1.0}) * 1e-5;
-    if (fineMin[axis] < coarseMin[axis] - tol) {
-      return false;
+    const double coarseSpacing = std::abs(coarse.spacing[axis]);
+    const double fineSpacing = std::abs(fine.spacing[axis]);
+    const double tol = std::max({coarseSpacing, fineSpacing, 1.0}) * 1e-5;
+
+    if (fineMin[axis] < coarseMin[axis] - tol ||
+        fineMax[axis] > coarseMax[axis] + tol) {
+      fineStrictlyInside = false;
     }
-    if (fineMax[axis] > coarseMax[axis] + tol) {
-      return false;
+
+    const double coarseWidth = coarseMax[axis] - coarseMin[axis];
+    const double fineWidth = fineMax[axis] - fineMin[axis];
+    bool axisOverlap = false;
+    if (coarseWidth <= tol && fineWidth <= tol) {
+      const double minDelta = std::abs(fineMin[axis] - coarseMin[axis]);
+      const double maxDelta = std::abs(fineMax[axis] - coarseMax[axis]);
+      axisOverlap = (minDelta <= tol) && (maxDelta <= tol);
+    } else {
+      axisOverlap = (fineMin[axis] < coarseMax[axis] - tol) &&
+                    (fineMax[axis] > coarseMin[axis] + tol);
+    }
+    if (!axisOverlap) {
+      boxesOverlap = false;
+    }
+
+    if (coarseSpacing > 0.0 && fineSpacing > 0.0 &&
+        fineSpacing + tol < coarseSpacing) {
+      hasFinerResolutionAxis = true;
     }
   }
+
+  if (!boxesOverlap) {
+    return false;
+  }
+
+  if (fineStrictlyInside) {
+    return true;
+  }
+
+  if (!hasFinerResolutionAxis) {
+    return false;
+  }
+
   return true;
 }
 
@@ -719,23 +756,83 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
     return hierarchy;
   }
 
+  auto getValueOr = [](const auto &container, int axis,
+                       auto fallback) -> decltype(fallback) {
+    if (axis >= 0 && axis < static_cast<int>(container.size())) {
+      return container[axis];
+    }
+    return fallback;
+  };
+
   std::vector<int> uniqueLevels;
   uniqueLevels.reserve(levels.size());
-  int lastLevel = std::numeric_limits<int>::min();
+  std::map<int, std::array<double, 3>> levelSpacingMap;
+  std::map<int, std::string> levelToMeshName;
+
   for (auto const &levelPair : levels) {
-    if (uniqueLevels.empty() || levelPair.first != lastLevel) {
-      uniqueLevels.push_back(levelPair.first);
-      lastLevel = levelPair.first;
+    const int levelValue = levelPair.first;
+    const std::string &meshName = levelPair.second;
+    if (levelSpacingMap.find(levelValue) != levelSpacingMap.end()) {
+      continue;
     }
+
+    openPMD::Mesh spacingMesh = iter.meshes.at(meshName);
+    openPMD::MeshRecordComponent representativeComponentForSpacing =
+        spacingMesh.scalar()
+            ? spacingMesh[openPMD::MeshRecordComponent::SCALAR]
+            : spacingMesh.begin()->second;
+    GeometryData spacingGeom =
+        GetGeometryXYZ(spacingMesh, &representativeComponentForSpacing, true);
+
+    const double unitSI = spacingMesh.gridUnitSI();
+    std::array<double, 3> spacingPerAxis{0.0, 0.0, 0.0};
+    for (int axis = 0; axis < 3; ++axis) {
+      double spacingValue = getValueOr(spacingGeom.gridSpacing, axis, 0.0);
+      if (spacingValue == 0.0 &&
+          axis < static_cast<int>(spacingGeom.extent.size()) &&
+          spacingGeom.extent[axis] > 1) {
+        spacingValue = 1.0;
+      }
+      spacingPerAxis[axis] = unitSI * spacingValue;
+    }
+
+    uniqueLevels.push_back(levelValue);
+    levelSpacingMap[levelValue] = spacingPerAxis;
+    levelToMeshName[levelValue] = meshName;
   }
+
+  if (uniqueLevels.empty()) {
+    return hierarchy;
+  }
+
+  auto spacingMetric = [](const std::array<double, 3> &spacing) {
+    double metric = 0.0;
+    for (double value : spacing) {
+      double absValue = std::abs(value);
+      if (absValue > metric) {
+        metric = absValue;
+      }
+    }
+    return metric;
+  };
+
+  std::vector<int> sortedLevels = uniqueLevels;
+  std::sort(sortedLevels.begin(), sortedLevels.end(), [&](int lhs, int rhs) {
+    const double lhsMetric = spacingMetric(levelSpacingMap[lhs]);
+    const double rhsMetric = spacingMetric(levelSpacingMap[rhs]);
+    if (std::abs(lhsMetric - rhsMetric) > 1e-12) {
+      return lhsMetric > rhsMetric;
+    }
+    return lhs < rhs;
+  });
 
   std::map<int, int> levelToGroupId;
-  for (size_t idx = 0; idx < uniqueLevels.size(); ++idx) {
-    levelToGroupId[uniqueLevels[idx]] = static_cast<int>(idx);
+  for (size_t idx = 0; idx < sortedLevels.size(); ++idx) {
+    levelToGroupId[sortedLevels[idx]] = static_cast<int>(idx);
   }
 
-  hierarchy.numLevels = static_cast<int>(uniqueLevels.size());
-  hierarchy.levelValues = uniqueLevels;
+  hierarchy.numLevels = static_cast<int>(sortedLevels.size());
+  hierarchy.levelValues = sortedLevels;
   hierarchy.patchesPerLevel.assign(hierarchy.numLevels, {});
   hierarchy.levelCellSizes.assign(hierarchy.numLevels,
                                   std::array<double, 3>{0.0, 0.0, 0.0});
@@ -743,7 +840,8 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
   std::map<int, int> patchCountByLevel;
 
   // Determine representative mesh to extract dimensional information.
-  const std::string &representativeMeshName = levels.front().second;
+  const std::string &representativeMeshName =
+      levelToMeshName.at(sortedLevels.front());
   openPMD::Mesh representativeMesh = iter.meshes.at(representativeMeshName);
   openPMD::MeshRecordComponent representativeComponentForGeom =
       representativeMesh.scalar()
@@ -764,7 +862,8 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
   hierarchy.spatialDim = topoDim;
 
   debug5 << "[openpmd-api-plugin] BuildHierarchy -- visitMeshName="
-         << visitMeshName << " levels=" << uniqueLevels.size()
+         << visitMeshName << " levels=" << hierarchy.numLevels
+         << " levelOrder=" << JoinContainer(hierarchy.levelValues)
          << " representativeMesh=" << representativeMeshName << "\n";
   debug5 << "[openpmd-api-plugin] Representative extent:";
   for (auto v : repGeom.extent) {
@@ -779,14 +878,6 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
     debug5 << ' ' << v;
   }
   debug5 << "\n";
-
-  auto getValueOr = [](const auto &container, int axis,
-                       auto fallback) -> decltype(fallback) {
-    if (axis >= 0 && axis < static_cast<int>(container.size())) {
-      return container[axis];
-    }
-    return fallback;
-  };
 
   for (auto const &[levelValue, meshName] : levels) {
     debug5 << "[openpmd-api-plugin]   processing mesh='" << meshName
