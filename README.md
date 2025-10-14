@@ -1,4 +1,4 @@
-# [WIP] openpmd-visit-reader
+# openpmd-visit-reader (beta)
 
 This is a parallel database plugin for VisIt that reads files using the OpenPMD-api.
 
