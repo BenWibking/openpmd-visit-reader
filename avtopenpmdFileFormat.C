@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <string>
+#include <filesystem>
 #include <unistd.h>
 
 #include <avtDatabaseMetaData.h>
