@@ -1,5 +1,0 @@
-[wibking@andes-login5]~/openpmd-visit-reader% module list
-
-Currently Loaded Modules:
-  1) Core/24.00   2) hsi/5.0.2.p5   3) DefApps   4) emacs/27.2   5) gcc/10.3.0   6) ninja/1.10.2   7) openmpi/4.1.2
-
