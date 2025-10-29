@@ -25,23 +25,17 @@ Unplanned:
    git submodule update --init
    ```
 
-2. Edit this line to point to your home directory:
-https://github.com/BenWibking/openpmd-visit-reader/blob/856c967442b6b903f3ddac2fc49963b40f547169/CMakeLists.txt#L3
+2. Copy `VisItLibraryDependencies.cmake` from your VisIt installation to the root of the repository.
 
-3. Edit this line to point to your VisIt installation:
-https://github.com/BenWibking/openpmd-visit-reader/blob/856c967442b6b903f3ddac2fc49963b40f547169/CMakeLists.txt#L4
-
-4. Copy `VisItLibraryDependencies.cmake` from your VisIt installation to the root of the repository.
-
-5. *(macOS only)* Run:
+3. *(macOS only)* Run:
    ```
    ./fix_VisItLibraryDependencies_macos.sh
    ```
 
-6. Finally, build with:
+4. Finally, build with (edit `VISIT_PLUGIN_DIR` and `VISIT_VS_INSTALL_FILE` according to your installation):
    ```
    mkdir build && cd build
-   cmake .. -GNinja
+   cmake .. -GNinja -DVISIT_PLUGIN_DIR="${HOME}/.visit/3.4.2/darwin-arm64/plugins" -DVISIT_PLUGIN_VS_INSTALL_FILE="/Applications/VisIt.app/Contents/Resources/3.4.2/darwin-arm64/include/PluginVsInstall.cmake"
    ninja
    ```
    The plugin should be installed to your `~/.visit` directory, where VisIt should detect and load it automatically. After recompiling the plugin, you may have to restart VisIt in order to use the new version of the plugin.
