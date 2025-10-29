@@ -32,7 +32,7 @@ Unplanned:
    ./fix_VisItLibraryDependencies_macos.sh
    ```
 
-4. Finally, build with (edit `VISIT_PLUGIN_DIR` and `VISIT_VS_INSTALL_FILE` according to your installation):
+4. Finally, build with (edit `VISIT_PLUGIN_DIR` and `VISIT_PLUGIN_VS_INSTALL_FILE` according to your installation):
    ```
    mkdir build && cd build
    cmake .. -GNinja -DVISIT_PLUGIN_DIR="${HOME}/.visit/3.4.2/darwin-arm64/plugins" -DVISIT_PLUGIN_VS_INSTALL_FILE="/Applications/VisIt.app/Contents/Resources/3.4.2/darwin-arm64/include/PluginVsInstall.cmake"
