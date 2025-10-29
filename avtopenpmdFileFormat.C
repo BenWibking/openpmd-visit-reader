@@ -25,7 +25,6 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <string>
-#include <filesystem>
 #include <unistd.h>
 
 #include <avtDatabaseMetaData.h>
@@ -433,6 +432,79 @@ inline std::string JoinStrings(const std::vector<std::string> &values) {
   return oss.str();
 }
 
+inline bool IsAbsolutePath(const std::string &path) {
+  if (path.empty()) {
+    return false;
+  }
+#ifdef _WIN32
+  if (path.size() >= 2 &&
+      std::isalpha(static_cast<unsigned char>(path[0])) &&
+      path[1] == ':') {
+    return true;
+  }
+  if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\') {
+    return true;
+  }
+  return path[0] == '/' || path[0] == '\\';
+#else
+  return path[0] == '/';
+#endif
+}
+
+inline std::string ParentDirectory(const std::string &path) {
+  if (path.empty()) {
+    return "";
+  }
+
+  const auto pos = path.find_last_of("/\\");
+  if (pos == std::string::npos) {
+    return "";
+  }
+
+#ifdef _WIN32
+  if (pos == 2 && path[1] == ':') {
+    return path.substr(0, pos + 1);
+  }
+#endif
+  if (pos == 0) {
+    return path.substr(0, 1);
+  }
+  return path.substr(0, pos);
+}
+
+inline bool EndsWithSeparator(const std::string &path) {
+  if (path.empty()) {
+    return false;
+  }
+  const char last = path.back();
+  return last == '/' || last == '\\';
+}
+
+inline std::string JoinPath(const std::string &parent,
+                            const std::string &child) {
+  if (child.empty()) {
+    return parent;
+  }
+  if (IsAbsolutePath(child) || parent.empty()) {
+    return child;
+  }
+
+  std::string result = parent;
+  if (!EndsWithSeparator(result)) {
+#ifdef _WIN32
+    if (result.size() == 2 && result[1] == ':') {
+      result.push_back('\\');
+    } else {
+      result.push_back('/');
+    }
+#else
+    result.push_back('/');
+#endif
+  }
+  result += child;
+  return result;
+}
+
 } // namespace
 
 // ****************************************************************************
@@ -531,10 +603,9 @@ avtopenpmdFileFormat::avtopenpmdFileFormat(const char *filename)
   }
 
   // construct complete filepath
-  std::filesystem::path p(filename);
-  std::string os_pathsep = "/";
-  std::string parent_path = p.parent_path();
-  std::string opmd_filepath = parent_path + os_pathsep + opmd_filestring;
+  std::string descriptor_path(filename);
+  std::string parent_path = ParentDirectory(descriptor_path);
+  std::string opmd_filepath = JoinPath(parent_path, opmd_filestring);
   debug1 << "[openpmd-api-plugin] Resolved openPMD path: " << opmd_filepath
          << "\n";
   debug5 << "[openpmd-api-plugin] "
