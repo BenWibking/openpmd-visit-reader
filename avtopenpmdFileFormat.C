@@ -39,6 +39,8 @@
 #include <vtkRectilinearGrid.h>
 #include <vtkUnstructuredGrid.h>
 #include <vtkUnsignedCharArray.h>
+#include <vtkIdTypeArray.h>
+#include <vtkIdTypeArray.h>
 
 #include <openPMD/openPMD.hpp>
 
@@ -50,6 +52,8 @@
 #include <InvalidVariableException.h>
 #include <InvalidFilesException.h>
 #include <avtGhostData.h>
+#include <avtVariableCache.h>
+#include <avtVariableCache.h>
 
 #include "avtopenpmdFileFormat.h"
 
@@ -177,6 +181,92 @@ inline std::size_t ElementCountFromExtent(const openPMD::Extent &extent) {
     count *= static_cast<std::size_t>(dim == 0 ? 1 : dim);
   }
   return count;
+}
+
+inline bool MeshIsNodeCentered(const MeshPatchHierarchy &hierarchy) {
+  for (const auto &patch : hierarchy.patches) {
+    if (patch.centering != AVT_UNKNOWN_CENT) {
+      return patch.centering == AVT_NODECENT;
+    }
+  }
+  return false;
+}
+
+inline std::array<int, 3>
+ComputeGlobalCellDimensions(const MeshPatchHierarchy &hierarchy,
+                            bool meshNodeCentered) {
+  std::array<int, 3> dims{1, 1, 1};
+  for (const auto &patch : hierarchy.patches) {
+    for (int axis = 0; axis < 3; ++axis) {
+      if (axis >= hierarchy.topologicalDim) {
+        dims[axis] = 1;
+        continue;
+      }
+      int limit = patch.logicalUpper[axis] + 1;
+      if (meshNodeCentered && limit > 0) {
+        limit -= 1;
+      }
+      if (limit > dims[axis]) {
+        dims[axis] = limit;
+      }
+    }
+  }
+  for (int axis = hierarchy.topologicalDim; axis < 3; ++axis) {
+    dims[axis] = 1;
+  }
+  return dims;
+}
+
+inline std::array<int, 3>
+ComputeGlobalNodeDimensions(const MeshPatchHierarchy &hierarchy,
+                            bool meshNodeCentered) {
+  std::array<int, 3> cellDims =
+      ComputeGlobalCellDimensions(hierarchy, meshNodeCentered);
+  std::array<int, 3> nodeDims{1, 1, 1};
+  for (int axis = 0; axis < 3; ++axis) {
+    if (axis >= hierarchy.topologicalDim) {
+      nodeDims[axis] = 1;
+    } else {
+      nodeDims[axis] = cellDims[axis] + (meshNodeCentered ? 0 : 1);
+    }
+  }
+  return nodeDims;
+}
+
+inline std::array<int, 3> ComputePatchCellCounts(const PatchInfo &patch,
+                                                 int topoDim,
+                                                 bool meshNodeCentered) {
+  std::array<int, 3> counts{1, 1, 1};
+  for (int axis = 0; axis < 3; ++axis) {
+    if (axis >= topoDim) {
+      counts[axis] = 1;
+      continue;
+    }
+    counts[axis] = patch.logicalUpper[axis] - patch.logicalLower[axis] + 1;
+    if (meshNodeCentered && counts[axis] > 0) {
+      counts[axis] -= 1;
+    }
+    if (counts[axis] <= 0) {
+      counts[axis] = 1;
+    }
+  }
+  return counts;
+}
+
+inline std::array<int, 3> ComputePatchNodeCounts(const PatchInfo &patch,
+                                                 int topoDim,
+                                                 bool meshNodeCentered) {
+  std::array<int, 3> cellCounts =
+      ComputePatchCellCounts(patch, topoDim, meshNodeCentered);
+  std::array<int, 3> nodeCounts{1, 1, 1};
+  for (int axis = 0; axis < 3; ++axis) {
+    if (axis >= topoDim) {
+      nodeCounts[axis] = 1;
+    } else {
+      nodeCounts[axis] = cellCounts[axis] + (meshNodeCentered ? 0 : 1);
+    }
+  }
+  return nodeCounts;
 }
 
 template <typename T>
@@ -1140,9 +1230,7 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
          << " var=" << varName << " timestep=" << timestep
          << " domain=" << domain << "\n";
 
-  if (type != nullptr &&
-      (strcmp(type, AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION) == 0 ||
-       strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0)) {
+  if (type != nullptr) {
     if (var == nullptr) {
       debug1 << "[openpmd-api-plugin] Auxiliary request missing var name\n";
       return NULL;
@@ -1156,9 +1244,35 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
 
     EnsureHierarchyInitialized(timestep);
 
-    const std::string meshName(var);
+    std::string requestedName(var);
+    std::string meshName = requestedName;
     auto &hierarchyMap = meshHierarchyCache_[timestep];
     auto it = hierarchyMap.find(meshName);
+    if (it == hierarchyMap.end()) {
+      auto varIt = varMap_.find(requestedName);
+      if (varIt != varMap_.end()) {
+        meshName = std::get<0>(varIt->second);
+        it = hierarchyMap.find(meshName);
+        debug1 << "[openpmd-api-plugin] Auxiliary request for var '"
+               << requestedName << "' mapped to mesh '" << meshName << "'\n";
+      } else {
+        debug1 << "[openpmd-api-plugin] Auxiliary request var '" << requestedName
+               << "' not found in varMap_ (size=" << varMap_.size() << ")\n";
+      }
+    }
+    if (it == hierarchyMap.end()) {
+      auto vecIt = vectorVarMap_.find(requestedName);
+      if (vecIt != vectorVarMap_.end()) {
+        meshName = std::get<0>(vecIt->second);
+        it = hierarchyMap.find(meshName);
+        debug1 << "[openpmd-api-plugin] Auxiliary request for vector var '"
+               << requestedName << "' mapped to mesh '" << meshName << "'\n";
+      } else {
+        debug1 << "[openpmd-api-plugin] Auxiliary request var '" << requestedName
+               << "' not found in vectorVarMap_ (size="
+               << vectorVarMap_.size() << ")\n";
+      }
+    }
     if (it == hierarchyMap.end()) {
       debug1 << "[openpmd-api-plugin] Auxiliary request missing mesh '"
              << meshName << "'\n";
@@ -1188,8 +1302,18 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
 
     if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
       if (domain == -1) {
-        debug1 << "[openpmd-api-plugin] Global boundary request not supported, returning null\n";
-        return NULL;
+        debug2 << "[openpmd-api-plugin] Building structured boundaries for mesh '"
+               << meshName << "'\n";
+        avtStructuredDomainBoundaries *structured =
+            BuildStructuredDomainBoundaries(hierarchy);
+        if (structured == nullptr) {
+          debug1 << "[openpmd-api-plugin] Structured boundary build returned nullptr\n";
+          return NULL;
+        }
+        df = avtStructuredDomainBoundaries::Destruct;
+        debug1 << "[openpmd-api-plugin] Structured boundaries ready for mesh '"
+               << meshName << "'\n";
+        return structured;
       }
       if (domain < 0 ||
           domain >= static_cast<int>(hierarchy.patches.size())) {
@@ -1209,6 +1333,46 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
       debug1 << "[openpmd-api-plugin] Domain boundary list ready for mesh '"
              << meshName << "' domain=" << domain << "\n";
       return boundaryList;
+    }
+
+    if (strcmp(type, AUXILIARY_DATA_GLOBAL_NODE_IDS) == 0 ||
+        strcmp(type, "GLOBAL_NODE_IDS") == 0) {
+      if (domain < 0 ||
+          domain >= static_cast<int>(hierarchy.patches.size())) {
+        debug1 << "[openpmd-api-plugin] Global node id request invalid domain "
+               << domain << " for mesh '" << meshName << "'\n";
+        return NULL;
+      }
+      vtkIdTypeArray *nodeIds = BuildGlobalNodeIds(hierarchy, domain);
+      if (nodeIds == nullptr) {
+        debug1 << "[openpmd-api-plugin] Failed to build global node ids for mesh '"
+               << meshName << "' domain=" << domain << "\n";
+        return NULL;
+      }
+      df = avtVariableCache::DestructVTKObject;
+      debug1 << "[openpmd-api-plugin] Global node ids ready for mesh '"
+             << meshName << "' domain=" << domain << "\n";
+      return nodeIds;
+    }
+
+    if (strcmp(type, AUXILIARY_DATA_GLOBAL_ZONE_IDS) == 0 ||
+        strcmp(type, "GLOBAL_ZONE_IDS") == 0) {
+      if (domain < 0 ||
+          domain >= static_cast<int>(hierarchy.patches.size())) {
+        debug1 << "[openpmd-api-plugin] Global zone id request invalid domain "
+               << domain << " for mesh '" << meshName << "'\n";
+        return NULL;
+      }
+      vtkIdTypeArray *zoneIds = BuildGlobalZoneIds(hierarchy, domain);
+      if (zoneIds == nullptr) {
+        debug1 << "[openpmd-api-plugin] Failed to build global zone ids for mesh '"
+               << meshName << "' domain=" << domain << "\n";
+        return NULL;
+      }
+      df = avtVariableCache::DestructVTKObject;
+      debug1 << "[openpmd-api-plugin] Global zone ids ready for mesh '"
+             << meshName << "' domain=" << domain << "\n";
+      return zoneIds;
     }
   }
 
@@ -1806,6 +1970,131 @@ avtopenpmdFileFormat::BuildDomainBoundaryList(
 
   return list;
 
+}
+
+avtStructuredDomainBoundaries *
+avtopenpmdFileFormat::BuildStructuredDomainBoundaries(
+    const MeshPatchHierarchy &hierarchy) const {
+  if (hierarchy.patches.empty()) {
+    return nullptr;
+  }
+
+  auto *boundaries = new avtRectilinearDomainBoundaries(true);
+  boundaries->SetNumDomains(static_cast<int>(hierarchy.patches.size()));
+
+  for (size_t patchIdx = 0; patchIdx < hierarchy.patches.size(); ++patchIdx) {
+    const PatchInfo &patch = hierarchy.patches[patchIdx];
+    int extents[6] = {0, 0, 0, 0, 0, 0};
+    for (int axis = 0; axis < 3; ++axis) {
+      if (axis >= hierarchy.topologicalDim) {
+        extents[2 * axis] = 0;
+        extents[2 * axis + 1] = 0;
+        continue;
+      }
+      extents[2 * axis] = patch.logicalLower[axis];
+      int upperExclusive = patch.logicalUpper[axis] + 1;
+      extents[2 * axis + 1] = upperExclusive;
+    }
+    int level = 0;
+    if (patchIdx < hierarchy.levelIdsPerPatch.size()) {
+      level = hierarchy.levelIdsPerPatch[patchIdx];
+    }
+    boundaries->SetIndicesForAMRPatch(static_cast<int>(patchIdx), level,
+                                      extents);
+  }
+
+  boundaries->CalculateBoundaries();
+  return boundaries;
+}
+
+vtkIdTypeArray *
+avtopenpmdFileFormat::BuildGlobalZoneIds(const MeshPatchHierarchy &hierarchy,
+                                         int domain) const {
+  if (hierarchy.patches.empty() || domain < 0 ||
+      domain >= static_cast<int>(hierarchy.patches.size())) {
+    return nullptr;
+  }
+
+  bool meshNodeCentered = MeshIsNodeCentered(hierarchy);
+  std::array<int, 3> globalDims =
+      ComputeGlobalCellDimensions(hierarchy, meshNodeCentered);
+  const PatchInfo &patch = hierarchy.patches[domain];
+  std::array<int, 3> counts =
+      ComputePatchCellCounts(patch, hierarchy.topologicalDim, meshNodeCentered);
+
+  vtkIdType totalTuples = static_cast<vtkIdType>(counts[0]) *
+                          static_cast<vtkIdType>(counts[1]) *
+                          static_cast<vtkIdType>(counts[2]);
+  vtkIdTypeArray *ids = vtkIdTypeArray::New();
+  ids->SetName("avtGlobalZoneId");
+  ids->SetNumberOfComponents(1);
+  ids->SetNumberOfTuples(totalTuples);
+
+  vtkIdType strideY = static_cast<vtkIdType>(globalDims[0]);
+  vtkIdType strideZ = strideY * static_cast<vtkIdType>(globalDims[1]);
+  vtkIdType *values = static_cast<vtkIdType *>(ids->GetVoidPointer(0));
+  vtkIdType idx = 0;
+
+  for (int k = 0; k < counts[2]; ++k) {
+    int gk = patch.logicalLower[2] + k;
+    for (int j = 0; j < counts[1]; ++j) {
+      int gj = patch.logicalLower[1] + j;
+      for (int i = 0; i < counts[0]; ++i) {
+        int gi = patch.logicalLower[0] + i;
+        vtkIdType globalId = static_cast<vtkIdType>(gi) +
+                             strideY * static_cast<vtkIdType>(gj) +
+                             strideZ * static_cast<vtkIdType>(gk);
+        values[idx++] = globalId;
+      }
+    }
+  }
+
+  return ids;
+}
+
+vtkIdTypeArray *
+avtopenpmdFileFormat::BuildGlobalNodeIds(const MeshPatchHierarchy &hierarchy,
+                                         int domain) const {
+  if (hierarchy.patches.empty() || domain < 0 ||
+      domain >= static_cast<int>(hierarchy.patches.size())) {
+    return nullptr;
+  }
+
+  bool meshNodeCentered = MeshIsNodeCentered(hierarchy);
+  std::array<int, 3> globalDims =
+      ComputeGlobalNodeDimensions(hierarchy, meshNodeCentered);
+  const PatchInfo &patch = hierarchy.patches[domain];
+  std::array<int, 3> counts =
+      ComputePatchNodeCounts(patch, hierarchy.topologicalDim, meshNodeCentered);
+
+  vtkIdType totalTuples = static_cast<vtkIdType>(counts[0]) *
+                          static_cast<vtkIdType>(counts[1]) *
+                          static_cast<vtkIdType>(counts[2]);
+  vtkIdTypeArray *ids = vtkIdTypeArray::New();
+  ids->SetName("avtGlobalNodeId");
+  ids->SetNumberOfComponents(1);
+  ids->SetNumberOfTuples(totalTuples);
+
+  vtkIdType strideY = static_cast<vtkIdType>(globalDims[0]);
+  vtkIdType strideZ = strideY * static_cast<vtkIdType>(globalDims[1]);
+  vtkIdType *values = static_cast<vtkIdType *>(ids->GetVoidPointer(0));
+  vtkIdType idx = 0;
+
+  for (int k = 0; k < counts[2]; ++k) {
+    int gk = patch.logicalLower[2] + k;
+    for (int j = 0; j < counts[1]; ++j) {
+      int gj = patch.logicalLower[1] + j;
+      for (int i = 0; i < counts[0]; ++i) {
+        int gi = patch.logicalLower[0] + i;
+        vtkIdType globalId = static_cast<vtkIdType>(gi) +
+                             strideY * static_cast<vtkIdType>(gj) +
+                             strideZ * static_cast<vtkIdType>(gk);
+        values[idx++] = globalId;
+      }
+    }
+  }
+
+  return ids;
 }
 
 void avtopenpmdFileFormat::AddGhostZonesForPatch(

@@ -24,11 +24,14 @@
 #include <avtMTMDFileFormat.h>
 #include <avtTypes.h>
 #include <avtStructuredDomainNesting.h>
+#include <avtStructuredDomainBoundaries.h>
 #include <avtLocalStructuredDomainBoundaries.h>
 #include <vtkSmartPointer.h>
 
 class vtkRectilinearGrid;
 class vtkUnstructuredGrid;
+class vtkIdTypeArray;
+class vtkIdTypeArray;
 
 struct GeometryData {
   std::vector<std::string> axisLabels;
@@ -198,6 +201,12 @@ protected:
   BuildDomainNesting(const MeshPatchHierarchy &hierarchy) const;
   avtLocalStructuredDomainBoundaryList *
   BuildDomainBoundaryList(const MeshPatchHierarchy &hierarchy, int domain) const;
+  avtStructuredDomainBoundaries *
+  BuildStructuredDomainBoundaries(const MeshPatchHierarchy &hierarchy) const;
+  vtkIdTypeArray *BuildGlobalNodeIds(const MeshPatchHierarchy &hierarchy,
+                                     int domain) const;
+  vtkIdTypeArray *BuildGlobalZoneIds(const MeshPatchHierarchy &hierarchy,
+                                     int domain) const;
   void AddGhostZonesForPatch(const MeshPatchHierarchy &hierarchy, int patchIdx,
                              vtkRectilinearGrid *grid) const;
 
