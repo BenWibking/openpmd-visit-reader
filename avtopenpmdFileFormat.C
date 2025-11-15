@@ -40,7 +40,6 @@
 #include <vtkUnstructuredGrid.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkIdTypeArray.h>
-#include <vtkIdTypeArray.h>
 
 #include <openPMD/openPMD.hpp>
 
@@ -53,7 +52,7 @@
 #include <InvalidFilesException.h>
 #include <avtGhostData.h>
 #include <avtVariableCache.h>
-#include <avtVariableCache.h>
+#include <void_ref_ptr.h>
 
 #include "avtopenpmdFileFormat.h"
 
@@ -827,6 +826,20 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
     hierarchy.metadataInitialized = true;
     hierarchyMap[visitMeshName] = hierarchy;
 
+    if (cache != nullptr) {
+      const MeshPatchHierarchy &cachedHierarchy = hierarchyMap[visitMeshName];
+      avtStructuredDomainBoundaries *structured =
+          BuildStructuredDomainBoundaries(cachedHierarchy);
+      if (structured != nullptr) {
+        void_ref_ptr vr(structured, avtStructuredDomainBoundaries::Destruct);
+        cache->CacheVoidRef(visitMeshName.c_str(),
+                            AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION,
+                            timeState, -1, vr);
+        debug1 << "[openpmd-api-plugin] Cached structured boundaries for mesh '"
+               << visitMeshName << "' timeState=" << timeState << "\n";
+      }
+    }
+
     meshMap_[visitMeshName] = std::tuple(DatasetType::Field, group.first);
     debug2 << "[openpmd-api-plugin] Registered AMR mesh '" << visitMeshName
            << "' backing openPMD mesh base '" << group.first
@@ -1231,6 +1244,10 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
          << " domain=" << domain << "\n";
 
   if (type != nullptr) {
+    if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
+      debug2 << "[openpmd-api-plugin] Delegating domain boundary request to base cache" << "\n";
+      return avtMTMDFileFormat::GetAuxiliaryData(var, timestep, domain, type, args, df);
+    }
     if (var == nullptr) {
       debug1 << "[openpmd-api-plugin] Auxiliary request missing var name\n";
       return NULL;
@@ -1298,41 +1315,6 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
       debug1 << "[openpmd-api-plugin] Domain nesting ready for mesh '"
              << meshName << "'\n";
       return nesting;
-    }
-
-    if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
-      if (domain == -1) {
-        debug2 << "[openpmd-api-plugin] Building structured boundaries for mesh '"
-               << meshName << "'\n";
-        avtStructuredDomainBoundaries *structured =
-            BuildStructuredDomainBoundaries(hierarchy);
-        if (structured == nullptr) {
-          debug1 << "[openpmd-api-plugin] Structured boundary build returned nullptr\n";
-          return NULL;
-        }
-        df = avtStructuredDomainBoundaries::Destruct;
-        debug1 << "[openpmd-api-plugin] Structured boundaries ready for mesh '"
-               << meshName << "'\n";
-        return structured;
-      }
-      if (domain < 0 ||
-          domain >= static_cast<int>(hierarchy.patches.size())) {
-        debug1 << "[openpmd-api-plugin] Auxiliary request invalid domain "
-               << domain << " for mesh '" << meshName << "'\n";
-        return NULL;
-      }
-      debug2 << "[openpmd-api-plugin] Building domain boundary list for mesh '"
-             << meshName << "' domain=" << domain << "\n";
-      avtLocalStructuredDomainBoundaryList *boundaryList =
-          BuildDomainBoundaryList(hierarchy, domain);
-      if (boundaryList == nullptr) {
-        debug1 << "[openpmd-api-plugin] Domain boundary build returned nullptr\n";
-        return NULL;
-      }
-      df = avtLocalStructuredDomainBoundaryList::Destruct;
-      debug1 << "[openpmd-api-plugin] Domain boundary list ready for mesh '"
-             << meshName << "' domain=" << domain << "\n";
-      return boundaryList;
     }
 
     if (strcmp(type, AUXILIARY_DATA_GLOBAL_NODE_IDS) == 0 ||
@@ -1789,6 +1771,18 @@ avtopenpmdFileFormat::CreateRectilinearPatch(const PatchInfo &patch) const {
   grid->SetXCoordinates(coords[0]);
   grid->SetYCoordinates(coords[1]);
   grid->SetZCoordinates(coords[2]);
+  debug5 << "[openpmd-api-plugin] CreateRectilinearPatch mesh=" << patch.meshName
+         << " level=" << patch.level << " logicalLower=[" << patch.logicalLower[0]
+         << "," << patch.logicalLower[1] << "," << patch.logicalLower[2]
+         << "] logicalUpper=[" << patch.logicalUpper[0] << ","
+         << patch.logicalUpper[1] << "," << patch.logicalUpper[2]
+         << "] vtkDims=[" << dimensions[0] << "," << dimensions[1] << ","
+         << dimensions[2] << "] centering="
+         << (patch.centering == AVT_ZONECENT ? "zone"
+                                             : (patch.centering == AVT_NODECENT
+                                                    ? "node"
+                                                    : "unknown"))
+         << "\n";
 
   for (int axis = 0; axis < 3; ++axis) {
     coords[axis]->Delete();
@@ -1889,6 +1883,15 @@ avtopenpmdFileFormat::BuildDomainBoundaryList(
     extents[2 * axis] = patch.logicalLower[axis];
     extents[2 * axis + 1] = patch.logicalUpper[axis];
   }
+  for (int axis = 0; axis < hierarchy.topologicalDim; ++axis) {
+    if (patch.centering == AVT_ZONECENT) {
+      extents[2 * axis + 1] += 1;
+    }
+  }
+  for (int axis = hierarchy.topologicalDim; axis < 3; ++axis) {
+    extents[2 * axis] = 0;
+    extents[2 * axis + 1] = 1;
+  }
 
   auto *list = new avtLocalStructuredDomainBoundaryList(domain, extents);
 
@@ -1965,6 +1968,22 @@ avtopenpmdFileFormat::BuildDomainBoundaryList(
       }
     }
 
+    for (int axis = 0; axis < hierarchy.topologicalDim; ++axis) {
+      if (patch.centering == AVT_ZONECENT) {
+        boundaryExtents[2 * axis + 1] += 1;
+      }
+    }
+    for (int axis = hierarchy.topologicalDim; axis < 3; ++axis) {
+      boundaryExtents[2 * axis] = 0;
+      boundaryExtents[2 * axis + 1] = 1;
+    }
+
+    debug5 << "[openpmd-api-plugin] LocalBoundary domain=" << domain
+           << " neighbor=" << otherIdx << " extents=["
+           << boundaryExtents[0] << "," << boundaryExtents[1] << " ; "
+           << boundaryExtents[2] << "," << boundaryExtents[3] << " ; "
+           << boundaryExtents[4] << "," << boundaryExtents[5] << "]\n";
+
     list->AddNeighbor(static_cast<int>(otherIdx), static_cast<int>(domain), orientation, boundaryExtents);
   }
 
@@ -1988,13 +2007,20 @@ avtopenpmdFileFormat::BuildStructuredDomainBoundaries(
     for (int axis = 0; axis < 3; ++axis) {
       if (axis >= hierarchy.topologicalDim) {
         extents[2 * axis] = 0;
-        extents[2 * axis + 1] = 0;
+        extents[2 * axis + 1] = 1;
         continue;
       }
       extents[2 * axis] = patch.logicalLower[axis];
       int upperExclusive = patch.logicalUpper[axis] + 1;
       extents[2 * axis + 1] = upperExclusive;
     }
+    debug5 << "[openpmd-api-plugin] StructuredBoundaries patch=" << patchIdx
+           << " level=" << (patchIdx < hierarchy.levelIdsPerPatch.size()
+                                ? hierarchy.levelIdsPerPatch[patchIdx]
+                                : 0)
+           << " extents=[" << extents[0] << "," << extents[1] << " ; "
+           << extents[2] << "," << extents[3] << " ; " << extents[4] << ","
+           << extents[5] << "]\n";
     int level = 0;
     if (patchIdx < hierarchy.levelIdsPerPatch.size()) {
       level = hierarchy.levelIdsPerPatch[patchIdx];
@@ -2021,6 +2047,13 @@ avtopenpmdFileFormat::BuildGlobalZoneIds(const MeshPatchHierarchy &hierarchy,
   const PatchInfo &patch = hierarchy.patches[domain];
   std::array<int, 3> counts =
       ComputePatchCellCounts(patch, hierarchy.topologicalDim, meshNodeCentered);
+  debug5 << "[openpmd-api-plugin] GlobalZoneIds domain=" << domain
+         << " globalDims=[" << globalDims[0] << "," << globalDims[1] << ","
+         << globalDims[2] << "]"
+         << " logicalLower=[" << patch.logicalLower[0] << ","
+         << patch.logicalLower[1] << "," << patch.logicalLower[2]
+         << "] counts=[" << counts[0] << "," << counts[1] << "," << counts[2]
+         << "]\n";
 
   vtkIdType totalTuples = static_cast<vtkIdType>(counts[0]) *
                           static_cast<vtkIdType>(counts[1]) *
@@ -2066,6 +2099,13 @@ avtopenpmdFileFormat::BuildGlobalNodeIds(const MeshPatchHierarchy &hierarchy,
   const PatchInfo &patch = hierarchy.patches[domain];
   std::array<int, 3> counts =
       ComputePatchNodeCounts(patch, hierarchy.topologicalDim, meshNodeCentered);
+  debug5 << "[openpmd-api-plugin] GlobalNodeIds domain=" << domain
+         << " globalDims=[" << globalDims[0] << "," << globalDims[1] << ","
+         << globalDims[2] << "]"
+         << " logicalLower=[" << patch.logicalLower[0] << ","
+         << patch.logicalLower[1] << "," << patch.logicalLower[2]
+         << "] counts=[" << counts[0] << "," << counts[1] << "," << counts[2]
+         << "]\n";
 
   vtkIdType totalTuples = static_cast<vtkIdType>(counts[0]) *
                           static_cast<vtkIdType>(counts[1]) *
