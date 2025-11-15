@@ -835,6 +835,9 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
         cache->CacheVoidRef(visitMeshName.c_str(),
                             AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION,
                             timeState, -1, vr);
+        cache->CacheVoidRef("any_mesh",
+                            AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION,
+                            timeState, -1, vr);
         debug1 << "[openpmd-api-plugin] Cached structured boundaries for mesh '"
                << visitMeshName << "' timeState=" << timeState << "\n";
       }
@@ -1243,20 +1246,17 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
          << " var=" << varName << " timestep=" << timestep
          << " domain=" << domain << "\n";
 
-  if (type != nullptr) {
-    if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
-      debug2 << "[openpmd-api-plugin] Delegating domain boundary request to base cache" << "\n";
-      return avtMTMDFileFormat::GetAuxiliaryData(var, timestep, domain, type, args, df);
-    }
+  auto resolveMesh = [&](std::string &meshNameOut,
+                         const MeshPatchHierarchy *&hierarchyOut) -> bool {
     if (var == nullptr) {
       debug1 << "[openpmd-api-plugin] Auxiliary request missing var name\n";
-      return NULL;
+      return false;
     }
 
     if (timestep < 0 ||
         timestep >= static_cast<int>(meshHierarchyCache_.size())) {
       debug1 << "[openpmd-api-plugin] Auxiliary request out-of-range timestep\n";
-      return NULL;
+      return false;
     }
 
     EnsureHierarchyInitialized(timestep);
@@ -1293,17 +1293,52 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
     if (it == hierarchyMap.end()) {
       debug1 << "[openpmd-api-plugin] Auxiliary request missing mesh '"
              << meshName << "'\n";
-      return NULL;
+      return false;
     }
 
     const MeshPatchHierarchy &hierarchy = it->second;
     if (hierarchy.patches.empty()) {
       debug1 << "[openpmd-api-plugin] Auxiliary request mesh '" << meshName
              << "' has no patches\n";
-      return NULL;
+      return false;
     }
 
+    meshNameOut = meshName;
+    hierarchyOut = &hierarchy;
+    return true;
+  };
+
+  if (type != nullptr &&
+      strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
+    std::string meshNameResolved;
+    const MeshPatchHierarchy *hier = nullptr;
+    if (!resolveMesh(meshNameResolved, hier)) {
+      return NULL;
+    }
+    return avtMTMDFileFormat::GetAuxiliaryData(meshNameResolved.c_str(),
+                                               timestep, domain, type, args,
+                                               df);
+  }
+
+  if (type != nullptr) {
+    if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
+      debug2 << "[openpmd-api-plugin] Delegating domain boundary request to base cache" << "\n";
+      return avtMTMDFileFormat::GetAuxiliaryData(var, timestep, domain, type, args, df);
+    }
+    const MeshPatchHierarchy *hierarchyPtr = nullptr;
+    std::string meshName;
+    auto requireHierarchy = [&]() -> bool {
+      if (hierarchyPtr != nullptr) {
+        return true;
+      }
+      return resolveMesh(meshName, hierarchyPtr);
+    };
+
     if (strcmp(type, AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION) == 0) {
+      if (!requireHierarchy()) {
+        return NULL;
+      }
+      const MeshPatchHierarchy &hierarchy = *hierarchyPtr;
       debug2 << "[openpmd-api-plugin] Building domain nesting for mesh '"
              << meshName << "'\n";
       avtStructuredDomainNesting *nesting = BuildDomainNesting(hierarchy);
@@ -1319,6 +1354,10 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
 
     if (strcmp(type, AUXILIARY_DATA_GLOBAL_NODE_IDS) == 0 ||
         strcmp(type, "GLOBAL_NODE_IDS") == 0) {
+      if (!requireHierarchy()) {
+        return NULL;
+      }
+      const MeshPatchHierarchy &hierarchy = *hierarchyPtr;
       if (domain < 0 ||
           domain >= static_cast<int>(hierarchy.patches.size())) {
         debug1 << "[openpmd-api-plugin] Global node id request invalid domain "
@@ -1339,6 +1378,10 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
 
     if (strcmp(type, AUXILIARY_DATA_GLOBAL_ZONE_IDS) == 0 ||
         strcmp(type, "GLOBAL_ZONE_IDS") == 0) {
+      if (!requireHierarchy()) {
+        return NULL;
+      }
+      const MeshPatchHierarchy &hierarchy = *hierarchyPtr;
       if (domain < 0 ||
           domain >= static_cast<int>(hierarchy.patches.size())) {
         debug1 << "[openpmd-api-plugin] Global zone id request invalid domain "
