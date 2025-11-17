@@ -11,6 +11,13 @@ INCLUDE("${VISIT_LIBRARY_DEPENDENCIES_FILE}")
 
 PROJECT(openpmd_database)
 
+option(OPENPMD_DISABLE_STRUCTURED_BOUNDARY_CACHE
+       "Skip building/caching structured boundary metadata for ghost synthesis"
+       OFF)
+if(OPENPMD_DISABLE_STRUCTURED_BOUNDARY_CACHE)
+    add_compile_definitions(OPENPMD_DISABLE_STRUCTURED_BOUNDARY_CACHE)
+endif()
+
 SET(COMMON_SOURCES
 openpmdPluginInfo.C
 openpmdCommonPluginInfo.C

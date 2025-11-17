@@ -40,6 +40,8 @@ Unplanned:
    ```
    The plugin should be installed to your `~/.visit` directory, where VisIt should detect and load it automatically. After recompiling the plugin, you may have to restart VisIt in order to use the new version of the plugin.
 
+   To skip caching the structured domain boundary metadata (and therefore disable VisIt's ghost-synthesis metadata path), add `-DOPENPMD_DISABLE_STRUCTURED_BOUNDARY_CACHE=ON` when invoking CMake.
+
 ## Testing
 
 1. Extract the example data using the provided script:

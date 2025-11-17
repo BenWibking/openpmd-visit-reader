@@ -10,5 +10,5 @@ module reset
 
 set -x
 #CXX=g++ CC=gcc ## DO NOT SET
-cmake -S . -B build -DopenPMD_USE_ADIOS2=ON -DopenPMD_USE_HDF5=OFF -DopenPMD_USE_MPI=ON
+cmake -S . -B build -DopenPMD_USE_ADIOS2=ON -DopenPMD_USE_HDF5=OFF -DopenPMD_USE_MPI=ON $1
 cmake --build build -j16

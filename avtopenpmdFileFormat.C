@@ -826,6 +826,7 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
     hierarchy.metadataInitialized = true;
     hierarchyMap[visitMeshName] = hierarchy;
 
+#if !defined(OPENPMD_DISABLE_STRUCTURED_BOUNDARY_CACHE)
     if (cache != nullptr) {
       const MeshPatchHierarchy &cachedHierarchy = hierarchyMap[visitMeshName];
       avtStructuredDomainBoundaries *structured =
@@ -842,6 +843,10 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
                << visitMeshName << "' timeState=" << timeState << "\n";
       }
     }
+#else
+    debug2 << "[openpmd-api-plugin] Skipping structured boundary cache for mesh '"
+           << visitMeshName << "' due to OPENPMD_DISABLE_STRUCTURED_BOUNDARY_CACHE\n";
+#endif
 
     meshMap_[visitMeshName] = std::tuple(DatasetType::Field, group.first);
     debug2 << "[openpmd-api-plugin] Registered AMR mesh '" << visitMeshName
