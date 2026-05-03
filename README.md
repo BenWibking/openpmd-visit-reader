@@ -35,6 +35,8 @@ Unplanned:
 
    `CMakeLists.txt` automatically reads `VisItLibraryDependencies.cmake` from the same VisIt include directory as `PluginVsInstall.cmake`. On macOS, it also normalizes VisIt's generated VTK dependency names to the shipped dylib filenames, so no manual dependency-file patching is needed.
 
+   Keep the `IopenpmdDatabase` info plugin lightweight. VisIt loads every database info plugin while populating the `Open` dialog, before any OpenPMD file is selected. If `libIopenpmdDatabase.dylib` links against OpenPMD, ADIOS2, or other backend dependencies, a loader/signing/rpath failure in those libraries can prevent `mdserver` from returning the directory listing and leave the `Open` dialog empty. The OpenPMD dependencies should stay in the metadata-server and engine plugin libraries that are used when a `.pmd` file is actually opened.
+
    On macOS, you can also use:
    ```
    ./build_macos.sh
