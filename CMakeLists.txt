@@ -127,7 +127,7 @@ set(CPPTRACE_GET_SYMBOLS_WITH_NOTHING OFF CACHE BOOL "" FORCE)
 add_subdirectory(${openpmd_database_SOURCE_DIR}/extern/cpptrace ${openpmd_database_BINARY_DIR}/cpptrace)
 
 ADD_LIBRARY(IopenpmdDatabase ${LIBI_SOURCES})
-TARGET_LINK_LIBRARIES(IopenpmdDatabase visitcommon openPMD::openPMD cpptrace::cpptrace)
+TARGET_LINK_LIBRARIES(IopenpmdDatabase visitcommon)
 SET(INSTALLTARGETS IopenpmdDatabase)
 
 IF(NOT VISIT_ENGINE_ONLY AND NOT VISIT_DBIO_ONLY)
@@ -148,5 +148,14 @@ IF(VISIT_PARALLEL)
     ADD_TARGET_DEFINITIONS(EopenpmdDatabase_par ENGINE)
     SET(INSTALLTARGETS ${INSTALLTARGETS} EopenpmdDatabase_par)
 ENDIF(VISIT_PARALLEL)
+
+IF(APPLE)
+    FOREACH(_OPENPMD_PLUGIN_TARGET IN LISTS INSTALLTARGETS)
+        ADD_CUSTOM_COMMAND(TARGET ${_OPENPMD_PLUGIN_TARGET} POST_BUILD
+            COMMAND /usr/bin/codesign --force --sign -
+                    "$<TARGET_FILE:${_OPENPMD_PLUGIN_TARGET}>"
+            COMMENT "Ad-hoc signing ${_OPENPMD_PLUGIN_TARGET}")
+    ENDFOREACH()
+ENDIF()
 
 VISIT_INSTALL_DATABASE_PLUGINS(${INSTALLTARGETS})
