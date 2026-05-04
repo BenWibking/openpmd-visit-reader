@@ -112,6 +112,15 @@ set(openPMD_BUILD_EXAMPLES OFF CACHE BOOL "")
 set(openPMD_BUILD_CLI_TOOLS OFF CACHE BOOL "")
 set(openPMD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(openPMD_INSTALL OFF CACHE BOOL "")
+if(NOT DEFINED openPMD_USE_HDF5 OR openPMD_USE_HDF5 STREQUAL "AUTO")
+    set(openPMD_USE_HDF5 OFF CACHE STRING
+        "HDF5 backend (.h5 files); disabled by default to avoid conflicts with VisIt's imported HDF5 targets."
+        FORCE)
+else()
+    set(openPMD_USE_HDF5 "${openPMD_USE_HDF5}" CACHE STRING
+        "HDF5 backend (.h5 files); disabled by default to avoid conflicts with VisIt's imported HDF5 targets.")
+endif()
+set_property(CACHE openPMD_USE_HDF5 PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
 add_subdirectory(${openpmd_database_SOURCE_DIR}/extern/openPMD-api ${openpmd_database_BINARY_DIR}/openPMD-api)
 include_directories(${OpenPMD_INCLUDE_DIRS_RET})
 
