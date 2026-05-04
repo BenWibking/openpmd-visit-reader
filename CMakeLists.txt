@@ -112,6 +112,18 @@ set(openPMD_BUILD_EXAMPLES OFF CACHE BOOL "")
 set(openPMD_BUILD_CLI_TOOLS OFF CACHE BOOL "")
 set(openPMD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(openPMD_INSTALL OFF CACHE BOOL "")
+option(OPENPMD_USE_VISIT_ADIOS2
+       "Use ADIOS2 libraries bundled with VisIt for openPMD-api."
+       ON)
+if(NOT DEFINED openPMD_USE_MPI OR openPMD_USE_MPI STREQUAL "AUTO")
+    set(openPMD_USE_MPI OFF CACHE STRING
+        "MPI backend; disabled by default to avoid mixing VisIt's bundled MPI with external ADIOS2/MPI runtimes."
+        FORCE)
+else()
+    set(openPMD_USE_MPI "${openPMD_USE_MPI}" CACHE STRING
+        "MPI backend; disabled by default to avoid mixing VisIt's bundled MPI with external ADIOS2/MPI runtimes.")
+endif()
+set_property(CACHE openPMD_USE_MPI PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
 if(NOT DEFINED openPMD_USE_HDF5 OR openPMD_USE_HDF5 STREQUAL "AUTO")
     set(openPMD_USE_HDF5 OFF CACHE STRING
         "HDF5 backend (.h5 files); disabled by default to avoid conflicts with VisIt's imported HDF5 targets."
@@ -121,6 +133,58 @@ else()
         "HDF5 backend (.h5 files); disabled by default to avoid conflicts with VisIt's imported HDF5 targets.")
 endif()
 set_property(CACHE openPMD_USE_HDF5 PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
+if(OPENPMD_USE_VISIT_ADIOS2 AND
+   NOT openPMD_USE_ADIOS2 STREQUAL "OFF" AND
+   NOT openPMD_USE_ADIOS2 STREQUAL "FALSE")
+    set(openPMD_USE_ADIOS2 ON CACHE STRING
+        "ADIOS2 backend (.bp files)." FORCE)
+    set_property(CACHE openPMD_USE_ADIOS2 PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
+
+    set(_VISIT_ADIOS2_SHIM_DIR
+        "${openpmd_database_BINARY_DIR}/visit-adios2-cmake")
+    file(MAKE_DIRECTORY "${_VISIT_ADIOS2_SHIM_DIR}")
+    file(WRITE "${_VISIT_ADIOS2_SHIM_DIR}/adios2-config.cmake"
+"set(ADIOS2_FOUND TRUE)
+set(ADIOS2_VERSION 2.10.0)
+set(ADIOS2_CXX_FOUND TRUE)
+set(ADIOS2_MPI_FOUND TRUE)
+
+set(_VISIT_ADIOS2_INCLUDE_DIR \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+set(_VISIT_ADIOS2_LIBRARY_DIR \"${VISIT_LIBRARY_DIR}\")
+
+foreach(_adios2_component cxx11 cxx11_mpi cxx cxx_mpi)
+  if(NOT TARGET adios2::\${_adios2_component})
+    add_library(adios2::\${_adios2_component} SHARED IMPORTED)
+  endif()
+endforeach()
+
+set_target_properties(adios2::cxx11 PROPERTIES
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11.so\"
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+set_target_properties(adios2::cxx11_mpi PROPERTIES
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi.so\"
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+set_target_properties(adios2::cxx PROPERTIES
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11.so\"
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+set_target_properties(adios2::cxx_mpi PROPERTIES
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi.so\"
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+")
+    file(WRITE "${_VISIT_ADIOS2_SHIM_DIR}/adios2-config-version.cmake"
+"set(PACKAGE_VERSION 2.10.0)
+if(PACKAGE_FIND_VERSION VERSION_GREATER PACKAGE_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  if(PACKAGE_FIND_VERSION VERSION_EQUAL PACKAGE_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+  endif()
+endif()
+")
+    set(ADIOS2_DIR "${_VISIT_ADIOS2_SHIM_DIR}" CACHE PATH
+        "CMake package shim for VisIt's bundled ADIOS2." FORCE)
+endif()
 add_subdirectory(${openpmd_database_SOURCE_DIR}/extern/openPMD-api ${openpmd_database_BINARY_DIR}/openPMD-api)
 include_directories(${OpenPMD_INCLUDE_DIRS_RET})
 
