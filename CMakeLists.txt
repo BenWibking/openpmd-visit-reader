@@ -151,6 +151,7 @@ set(ADIOS2_MPI_FOUND TRUE)
 
 set(_VISIT_ADIOS2_INCLUDE_DIR \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
 set(_VISIT_ADIOS2_LIBRARY_DIR \"${VISIT_LIBRARY_DIR}\")
+set(_VISIT_ADIOS2_LIBRARY_SUFFIX \"${CMAKE_SHARED_LIBRARY_SUFFIX}\")
 
 foreach(_adios2_component cxx11 cxx11_mpi cxx cxx_mpi)
   if(NOT TARGET adios2::\${_adios2_component})
@@ -159,16 +160,16 @@ foreach(_adios2_component cxx11 cxx11_mpi cxx cxx_mpi)
 endforeach()
 
 set_target_properties(adios2::cxx11 PROPERTIES
-  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11.so\"
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11${CMAKE_SHARED_LIBRARY_SUFFIX}\"
   INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
 set_target_properties(adios2::cxx11_mpi PROPERTIES
-  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi.so\"
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi${CMAKE_SHARED_LIBRARY_SUFFIX}\"
   INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
 set_target_properties(adios2::cxx PROPERTIES
-  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11.so\"
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11${CMAKE_SHARED_LIBRARY_SUFFIX}\"
   INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
 set_target_properties(adios2::cxx_mpi PROPERTIES
-  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi.so\"
+  IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi${CMAKE_SHARED_LIBRARY_SUFFIX}\"
   INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
 ")
     file(WRITE "${_VISIT_ADIOS2_SHIM_DIR}/adios2-config-version.cmake"
