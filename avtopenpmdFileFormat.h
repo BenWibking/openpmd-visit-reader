@@ -122,6 +122,8 @@ public:
   // virtual void        GetCycles(std::vector<int> &);
   // virtual void        GetTimes(std::vector<double> &);
   //
+  void GetCycles(std::vector<int> &) override;
+  void GetTimes(std::vector<double> &) override;
 
   int GetNTimesteps(void) override;
 

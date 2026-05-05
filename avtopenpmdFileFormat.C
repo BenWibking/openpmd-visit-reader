@@ -764,6 +764,26 @@ int avtopenpmdFileFormat::GetNTimesteps(void) {
   return series_.snapshots().size();
 }
 
+void avtopenpmdFileFormat::GetCycles(std::vector<int> &cycles) {
+  cycles.resize(iterationIndex_.size());
+
+  for (size_t timeState = 0; timeState < iterationIndex_.size();
+       ++timeState) {
+    cycles[timeState] = static_cast<int>(iterationIndex_[timeState]);
+  }
+}
+
+void avtopenpmdFileFormat::GetTimes(std::vector<double> &times) {
+  times.resize(iterationIndex_.size());
+
+  for (size_t timeState = 0; timeState < iterationIndex_.size();
+       ++timeState) {
+    const unsigned long long iterIdx = iterationIndex_[timeState];
+    openPMD::Iteration iter = series_.snapshots()[iterIdx];
+    times[timeState] = iter.time<double>();
+  }
+}
+
 // ****************************************************************************
 //  Method: avtopenpmdFileFormat::FreeUpResources
 //
