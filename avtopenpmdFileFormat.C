@@ -23,6 +23,7 @@
 #include <sstream>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -180,6 +181,28 @@ inline std::size_t ElementCountFromExtent(const openPMD::Extent &extent) {
     count *= static_cast<std::size_t>(dim == 0 ? 1 : dim);
   }
   return count;
+}
+
+inline int NonSingletonExtentDimensions(const openPMD::Extent &extent) {
+  int dims = 0;
+  for (auto dim : extent) {
+    if (dim > 1 && dim < std::numeric_limits<uint64_t>::max() / 2) {
+      ++dims;
+    }
+  }
+  return dims;
+}
+
+inline bool ExtentLooksInvalid(const openPMD::Extent &extent) {
+  if (extent.empty()) {
+    return true;
+  }
+  for (auto dim : extent) {
+    if (dim > std::numeric_limits<uint64_t>::max() / 2) {
+      return true;
+    }
+  }
+  return false;
 }
 
 inline bool MeshIsNodeCentered(const MeshPatchHierarchy &hierarchy) {
@@ -831,6 +854,8 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
 
   auto &hierarchyMap = meshHierarchyCache_.at(timeState);
   hierarchyMap.clear();
+  std::unordered_set<std::string> scalarVarsThisCall;
+  std::unordered_set<std::string> vectorVarsThisCall;
 
   for (auto &group : groupedMeshes) {
     debug2 << "[openpmd-api-plugin] Processing mesh group '" << group.first
@@ -907,56 +932,51 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
     auto registerScalarVar =
         [&](const std::string &varname, const std::string &componentName,
             avtCentering cent, const char *kind) {
-          varMap_[varname] = std::tuple(visitMeshName, componentName);
+          const std::string visitVarName = MakeGuiSafeVariableName(varname);
+          if (scalarVarsThisCall.find(visitVarName) != scalarVarsThisCall.end() ||
+              vectorVarsThisCall.find(visitVarName) != vectorVarsThisCall.end()) {
+            debug1 << "[openpmd-api-plugin] Skipping " << kind
+                   << " var '" << varname << "' because GUI-safe name '"
+                   << visitVarName << "' already exists in this timestep\n";
+            return;
+          }
+
+          scalarVarsThisCall.insert(visitVarName);
+          varMap_[visitVarName] = std::tuple(visitMeshName, componentName);
           if (md != nullptr) {
-            AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+            AddScalarVarToMetaData(md, visitVarName, visitMeshName, cent);
           }
           debug2 << "[openpmd-api-plugin] Registered " << kind << " var '"
-                 << varname << "' centering=" << CenteringToString(cent)
-                 << " representativeMesh='" << representativeMeshName
-                 << "'\n";
-
-          const std::string alias = MakeGuiSafeVariableName(varname);
-          if (alias != varname && varMap_.find(alias) == varMap_.end() &&
-              vectorVarMap_.find(alias) == vectorVarMap_.end()) {
-            varMap_[alias] = std::tuple(visitMeshName, componentName);
-            if (md != nullptr) {
-              AddScalarVarToMetaData(md, alias, visitMeshName, cent);
-            }
-            debug2 << "[openpmd-api-plugin] Registered GUI-safe scalar alias '"
-                   << alias << "' for '" << varname << "'\n";
-          }
+                 << visitVarName << "' from openPMD name '" << varname
+                 << "' centering=" << CenteringToString(cent)
+                 << " representativeMesh='" << representativeMeshName << "'\n";
         };
 
     auto registerVectorVar =
         [&](const std::string &varname,
-            const std::vector<std::string> &componentNames,
-            avtCentering cent) {
-          vectorVarMap_[varname] =
+              const std::vector<std::string> &componentNames,
+              avtCentering cent) {
+          const std::string visitVarName = MakeGuiSafeVariableName(varname);
+          if (vectorVarsThisCall.find(visitVarName) != vectorVarsThisCall.end() ||
+              scalarVarsThisCall.find(visitVarName) != scalarVarsThisCall.end()) {
+            debug1 << "[openpmd-api-plugin] Skipping vector var '" << varname
+                   << "' because GUI-safe name '" << visitVarName
+                   << "' already exists in this timestep\n";
+            return;
+          }
+
+          vectorVarsThisCall.insert(visitVarName);
+          vectorVarMap_[visitVarName] =
               std::make_tuple(visitMeshName, componentNames);
           if (md != nullptr) {
-            AddVectorVarToMetaData(md, varname, visitMeshName, cent,
+            AddVectorVarToMetaData(md, visitVarName, visitMeshName, cent,
                                    static_cast<int>(componentNames.size()));
           }
           debug2 << "[openpmd-api-plugin] Registered vector var '"
-                 << varname << "' components=" << JoinStrings(componentNames)
+                 << visitVarName << "' from openPMD name '" << varname
+                 << "' components=" << JoinStrings(componentNames)
                  << " centering=" << CenteringToString(cent)
-                 << " representativeMesh='" << representativeMeshName
-                 << "'\n";
-
-          const std::string alias = MakeGuiSafeVariableName(varname);
-          if (alias != varname &&
-              vectorVarMap_.find(alias) == vectorVarMap_.end() &&
-              varMap_.find(alias) == varMap_.end()) {
-            vectorVarMap_[alias] =
-                std::make_tuple(visitMeshName, componentNames);
-            if (md != nullptr) {
-              AddVectorVarToMetaData(md, alias, visitMeshName, cent,
-                                     static_cast<int>(componentNames.size()));
-            }
-            debug2 << "[openpmd-api-plugin] Registered GUI-safe vector alias '"
-                   << alias << "' for '" << varname << "'\n";
-          }
+                 << " representativeMesh='" << representativeMeshName << "'\n";
         };
 
     if (mesh.scalar()) {
@@ -1194,21 +1214,24 @@ void avtopenpmdFileFormat::BuildParticleMetaData(avtDatabaseMetaData *md,
       if (record.scalar()) {
         std::string componentPath =
             recordName + "/" + openPMD::RecordComponent::SCALAR;
-        std::string varName = speciesName + "/" + recordName;
+        std::string openPMDVarName = speciesName + "/" + recordName;
+        std::string varName = MakeGuiSafeVariableName(openPMDVarName);
         varMap_[varName] = std::tuple(visitMeshName, componentPath);
         if (md != nullptr) {
           AddScalarVarToMetaData(md, varName, visitMeshName, AVT_NODECENT);
         }
         debug2 << "[openpmd-api-plugin] Registered particle scalar '"
-               << varName << "'\n";
+               << varName << "' from openPMD name '" << openPMDVarName
+               << "'\n";
       } else {
         std::vector<std::string> componentPaths;
         componentPaths.reserve(record.size());
         for (auto const &componentEntry : record) {
           const std::string &componentName = componentEntry.first;
           std::string componentPath = recordName + "/" + componentName;
-          std::string scalarName = speciesName + "/" + recordName + "/" +
-                                   componentName;
+          std::string openPMDScalarName = speciesName + "/" + recordName +
+                                          "/" + componentName;
+          std::string scalarName = MakeGuiSafeVariableName(openPMDScalarName);
           componentPaths.push_back(componentPath);
           varMap_[scalarName] = std::tuple(visitMeshName, componentPath);
           if (md != nullptr) {
@@ -1216,11 +1239,13 @@ void avtopenpmdFileFormat::BuildParticleMetaData(avtDatabaseMetaData *md,
                                    AVT_NODECENT);
           }
           debug2 << "[openpmd-api-plugin] Registered particle component '"
-                 << scalarName << "'\n";
+                 << scalarName << "' from openPMD name '" << openPMDScalarName
+                 << "'\n";
         }
 
         if (!componentPaths.empty()) {
-          std::string vectorName = speciesName + "/" + recordName;
+          std::string openPMDVectorName = speciesName + "/" + recordName;
+          std::string vectorName = MakeGuiSafeVariableName(openPMDVectorName);
           vectorVarMap_[vectorName] =
               std::tuple(visitMeshName, componentPaths);
           if (md != nullptr) {
@@ -1229,8 +1254,8 @@ void avtopenpmdFileFormat::BuildParticleMetaData(avtDatabaseMetaData *md,
                                    static_cast<int>(componentPaths.size()));
           }
           debug2 << "[openpmd-api-plugin] Registered particle vector '"
-                 << vectorName << "' components="
-                 << JoinStrings(componentPaths) << "\n";
+                 << vectorName << "' from openPMD name '" << openPMDVectorName
+                 << "' components=" << JoinStrings(componentPaths) << "\n";
         }
       }
     }
@@ -3040,6 +3065,20 @@ GeometryData avtopenpmdFileFormat::GetGeometry3D(
 
   // get array extents
   auto extent = mesh.getExtent();
+  if (representative != nullptr) {
+    openPMD::Extent representativeExtent = representative->getExtent();
+    const bool useRepresentativeExtent =
+        !representativeExtent.empty() &&
+        (ExtentLooksInvalid(extent) || extent.size() != axisLabels.size() ||
+         NonSingletonExtentDimensions(representativeExtent) >
+             NonSingletonExtentDimensions(extent));
+    if (useRepresentativeExtent) {
+      debug2 << "[openpmd-api-plugin] GetGeometry3D using representative "
+             << "component extent=" << JoinContainer(representativeExtent)
+             << " instead of mesh extent=" << JoinContainer(extent) << "\n";
+      extent = representativeExtent;
+    }
+  }
 
   // get grid spacing
   std::vector<double> gridSpacing = mesh.gridSpacing<double>();

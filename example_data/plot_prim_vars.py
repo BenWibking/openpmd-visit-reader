@@ -6,7 +6,7 @@ Run with:
   visit -cli -nowin -s example_data/plot_prim_vars.py /path/to/file.pmd
 
 The script writes a metadata dump and one PNG per plotted variable.  By default
-it plots every scalar whose metadata name starts with "prim/".
+it plots every scalar whose metadata name starts with "prim_".
 """
 
 import argparse
@@ -15,7 +15,7 @@ import re
 import sys
 
 
-DEFAULT_PATTERNS = (r"^prim/",)
+DEFAULT_PATTERNS = (r"^prim_",)
 
 
 def parse_args():
@@ -29,7 +29,7 @@ def parse_args():
         default=None,
         help=(
             "Regex matched against VisIt scalar names. May be repeated. "
-            "Default: '^prim/'."
+            "Default: '^prim_'."
         ),
     )
     parser.add_argument(
@@ -55,6 +55,28 @@ def parse_args():
         "--list-only",
         action="store_true",
         help="Only print/dump metadata; do not create plots.",
+    )
+    parser.add_argument(
+        "--dump-states",
+        action="store_true",
+        help="Dump metadata after walking every active time-slider state.",
+    )
+    parser.add_argument(
+        "--plot-states",
+        action="store_true",
+        help="With --dump-states, plot selected variables at each state.",
+    )
+    parser.add_argument(
+        "--state-limit",
+        type=int,
+        default=None,
+        help="Maximum number of time-slider states to dump in --dump-states mode.",
+    )
+    parser.add_argument(
+        "--initial-state",
+        type=int,
+        default=None,
+        help="Set the active time-slider state before listing or plotting.",
     )
     return parser.parse_args()
 
@@ -86,14 +108,48 @@ def mesh_names(metadata):
 def write_metadata_dump(path, metadata, scalars, vectors, meshes):
     with open(path, "w") as output:
         output.write("Meshes ({})\n".format(len(meshes)))
-        for name in meshes:
+        for i, name in enumerate(meshes):
+            mesh = metadata.GetMeshes(i)
             output.write("  {}\n".format(name))
+            for attr in (
+                "meshType",
+                "topologicalDimension",
+                "spatialDimension",
+                "numBlocks",
+                "numGroups",
+                "validVariable",
+                "hideFromGUI",
+            ):
+                if hasattr(mesh, attr):
+                    output.write("    {}={}\n".format(attr, getattr(mesh, attr)))
         output.write("\nScalars ({})\n".format(len(scalars)))
-        for name in scalars:
+        for i, name in enumerate(scalars):
+            scalar = metadata.GetScalars(i)
             output.write("  {}\n".format(name))
+            for attr in (
+                "originalName",
+                "meshName",
+                "centering",
+                "validVariable",
+                "hideFromGUI",
+                "treatAsASCII",
+            ):
+                if hasattr(scalar, attr):
+                    output.write("    {}={}\n".format(attr, getattr(scalar, attr)))
         output.write("\nVectors ({})\n".format(len(vectors)))
-        for name in vectors:
+        for i, name in enumerate(vectors):
+            vector = metadata.GetVectors(i)
             output.write("  {}\n".format(name))
+            for attr in (
+                "originalName",
+                "meshName",
+                "centering",
+                "validVariable",
+                "hideFromGUI",
+                "varDim",
+            ):
+                if hasattr(vector, attr):
+                    output.write("    {}={}\n".format(attr, getattr(vector, attr)))
 
 
 def selected_scalars(args, scalars):
@@ -114,6 +170,38 @@ def selected_scalars(args, scalars):
         if any(pattern.search(name) for pattern in compiled):
             selected.append(name)
     return selected
+
+
+def dump_metadata_for_state(args, dataset, state, out_dir):
+    print("Reading metadata for time state {}".format(state))
+    if args.plot_states:
+        result = TimeSliderSetState(state)
+        print("  TimeSliderSetState returned {}".format(result))
+        metadata = GetMetaData(dataset)
+    else:
+        metadata = GetMetaData(dataset, state)
+    meshes = mesh_names(metadata)
+    scalars = scalar_names(metadata)
+    vectors = vector_names(metadata)
+    dump_path = os.path.join(out_dir, "metadata_state_{:05d}.txt".format(state))
+    write_metadata_dump(dump_path, metadata, scalars, vectors, meshes)
+    candidates = selected_scalars(args, scalars)
+    print(
+        "  state {}: meshes={} scalars={} vectors={} prim_scalars={}".format(
+            state, len(meshes), len(scalars), len(vectors), len(candidates)
+        )
+    )
+    print("  metadata dump: {}".format(dump_path))
+    for name in candidates:
+        print("    {}".format(name))
+    if args.plot_states:
+        state_plot_dir = os.path.join(out_dir, "state_{:05d}".format(state))
+        os.makedirs(state_plot_dir, exist_ok=True)
+        for name in candidates:
+            plot_scalar(
+                name, state_plot_dir, args.format, args.width, args.height
+            )
+    return candidates
 
 
 def configure_save_window(out_dir, file_stem, image_format, width, height):
@@ -163,6 +251,27 @@ def main():
 
     print("Opening dataset: {}".format(dataset))
     OpenDatabase(dataset)
+    if args.initial_state is not None:
+        print("Setting initial time state: {}".format(args.initial_state))
+        result = TimeSliderSetState(args.initial_state)
+        print("TimeSliderSetState returned {}".format(result))
+
+    if args.dump_states:
+        num_states = TimeSliderGetNStates()
+        print("Time slider states: {}".format(num_states))
+        missing_states = []
+        state_count = num_states
+        if args.state_limit is not None:
+            state_count = min(num_states, max(0, args.state_limit))
+        for state in range(state_count):
+            candidates = dump_metadata_for_state(args, dataset, state, out_dir)
+            if not candidates:
+                missing_states.append(state)
+        if missing_states:
+            print("No prim scalars were visible in states: {}".format(missing_states))
+            return 2
+        return 0
+
     metadata = GetMetaData(dataset)
 
     meshes = mesh_names(metadata)
