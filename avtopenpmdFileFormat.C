@@ -969,6 +969,9 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
           std::string varname = group.first + "/" + componentName;
           avtCentering cent =
               GetCenteringType<openPMD::MeshRecordComponent>(entry.second);
+          if (cent == AVT_UNKNOWN_CENT) {
+            cent = vectorCentering;
+          }
           if (cent != AVT_UNKNOWN_CENT) {
             varMap_[varname] = std::tuple(visitMeshName, componentName);
             if (md != nullptr) {
@@ -1448,6 +1451,9 @@ avtopenpmdFileFormat::ParseMeshLevel(std::string const &meshName) const {
       if (digitsEnd > digitsBegin) {
         level = std::stoi(meshName.substr(digitsBegin, digitsEnd - digitsBegin));
         base = meshName.substr(0, pos);
+        if (digitsEnd < meshName.size() && meshName[digitsEnd] == '/') {
+          base += meshName.substr(digitsEnd);
+        }
       }
     }
   }
