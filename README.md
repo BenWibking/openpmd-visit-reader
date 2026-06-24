@@ -25,20 +25,22 @@ Unplanned:
    git submodule update --init
    ```
 
-2. Copy `VisItLibraryDependencies.cmake` from your VisIt installation to the root of the repository.
-
-3. *(macOS only)* Run:
-   ```
-   ./fix_VisItLibraryDependencies_macos.sh
-   ```
-
-4. Finally, build with (edit `VISIT_PLUGIN_DIR` and `VISIT_PLUGIN_VS_INSTALL_FILE` according to your installation):
+2. Build with (edit `VISIT_PLUGIN_DIR` and `VISIT_PLUGIN_VS_INSTALL_FILE` according to your installation):
    ```
    mkdir build && cd build
-   cmake .. -GNinja -DVISIT_PLUGIN_DIR="${HOME}/.visit/3.4.2/darwin-arm64/plugins" -DVISIT_PLUGIN_VS_INSTALL_FILE="/Applications/VisIt.app/Contents/Resources/3.4.2/darwin-arm64/include/PluginVsInstall.cmake"
+   cmake .. -GNinja -DVISIT_PLUGIN_DIR="${HOME}/.visit/3.5.0/darwin-arm64/plugins" -DVISIT_PLUGIN_VS_INSTALL_FILE="/Applications/VisIt.app/Contents/Resources/3.5.0/darwin-arm64/include/PluginVsInstall.cmake"
    ninja
    ```
    The plugin should be installed to your `~/.visit` directory, where VisIt should detect and load it automatically. After recompiling the plugin, you may have to restart VisIt in order to use the new version of the plugin.
+
+   `CMakeLists.txt` automatically reads `VisItLibraryDependencies.cmake` from the same VisIt include directory as `PluginVsInstall.cmake`. On macOS, it also normalizes VisIt's generated VTK dependency names to the shipped dylib filenames, so no manual dependency-file patching is needed.
+
+   Keep the `IopenpmdDatabase` info plugin lightweight. VisIt loads every database info plugin while populating the `Open` dialog, before any OpenPMD file is selected. If `libIopenpmdDatabase.dylib` links against OpenPMD, ADIOS2, or other backend dependencies, a loader/signing/rpath failure in those libraries can prevent `mdserver` from returning the directory listing and leave the `Open` dialog empty. The OpenPMD dependencies should stay in the metadata-server and engine plugin libraries that are used when a `.pmd` file is actually opened.
+
+   On macOS, you can also use:
+   ```
+   ./build_macos.sh
+   ```
 
    To skip caching the structured domain boundary metadata (and therefore disable VisIt's ghost-synthesis metadata path), add `-DOPENPMD_DISABLE_STRUCTURED_BOUNDARY_CACHE=ON` when invoking CMake.
 
