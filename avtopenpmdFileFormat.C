@@ -521,6 +521,12 @@ inline std::string JoinStrings(const std::vector<std::string> &values) {
   return oss.str();
 }
 
+inline std::string MakeGuiSafeVariableName(const std::string &name) {
+  std::string alias = name;
+  std::replace(alias.begin(), alias.end(), '/', '_');
+  return alias;
+}
+
 inline bool IsAbsolutePath(const std::string &path) {
   if (path.empty()) {
     return false;
@@ -898,18 +904,67 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
     const std::string &representativeMeshName = levels.back().second;
     openPMD::Mesh mesh = i.meshes.at(representativeMeshName);
 
+    auto registerScalarVar =
+        [&](const std::string &varname, const std::string &componentName,
+            avtCentering cent, const char *kind) {
+          varMap_[varname] = std::tuple(visitMeshName, componentName);
+          if (md != nullptr) {
+            AddScalarVarToMetaData(md, varname, visitMeshName, cent);
+          }
+          debug2 << "[openpmd-api-plugin] Registered " << kind << " var '"
+                 << varname << "' centering=" << CenteringToString(cent)
+                 << " representativeMesh='" << representativeMeshName
+                 << "'\n";
+
+          const std::string alias = MakeGuiSafeVariableName(varname);
+          if (alias != varname && varMap_.find(alias) == varMap_.end() &&
+              vectorVarMap_.find(alias) == vectorVarMap_.end()) {
+            varMap_[alias] = std::tuple(visitMeshName, componentName);
+            if (md != nullptr) {
+              AddScalarVarToMetaData(md, alias, visitMeshName, cent);
+            }
+            debug2 << "[openpmd-api-plugin] Registered GUI-safe scalar alias '"
+                   << alias << "' for '" << varname << "'\n";
+          }
+        };
+
+    auto registerVectorVar =
+        [&](const std::string &varname,
+            const std::vector<std::string> &componentNames,
+            avtCentering cent) {
+          vectorVarMap_[varname] =
+              std::make_tuple(visitMeshName, componentNames);
+          if (md != nullptr) {
+            AddVectorVarToMetaData(md, varname, visitMeshName, cent,
+                                   static_cast<int>(componentNames.size()));
+          }
+          debug2 << "[openpmd-api-plugin] Registered vector var '"
+                 << varname << "' components=" << JoinStrings(componentNames)
+                 << " centering=" << CenteringToString(cent)
+                 << " representativeMesh='" << representativeMeshName
+                 << "'\n";
+
+          const std::string alias = MakeGuiSafeVariableName(varname);
+          if (alias != varname &&
+              vectorVarMap_.find(alias) == vectorVarMap_.end() &&
+              varMap_.find(alias) == varMap_.end()) {
+            vectorVarMap_[alias] =
+                std::make_tuple(visitMeshName, componentNames);
+            if (md != nullptr) {
+              AddVectorVarToMetaData(md, alias, visitMeshName, cent,
+                                     static_cast<int>(componentNames.size()));
+            }
+            debug2 << "[openpmd-api-plugin] Registered GUI-safe vector alias '"
+                   << alias << "' for '" << varname << "'\n";
+          }
+        };
+
     if (mesh.scalar()) {
       std::string varname = group.first;
       avtCentering cent = GetCenteringType<openPMD::Mesh>(mesh);
       if (cent != AVT_UNKNOWN_CENT) {
-        varMap_[varname] = std::tuple(visitMeshName,
-                                       openPMD::MeshRecordComponent::SCALAR);
-        if (md != nullptr) {
-          AddScalarVarToMetaData(md, varname, visitMeshName, cent);
-        }
-        debug2 << "[openpmd-api-plugin] Registered scalar var '" << varname
-               << "' centering=" << CenteringToString(cent)
-               << " representativeMesh='" << representativeMeshName << "'\n";
+        registerScalarVar(varname, openPMD::MeshRecordComponent::SCALAR, cent,
+                          "scalar");
       } else {
         debug1 << "[openpmd-api-plugin] Skipping mesh '" << group.first
                << "' due to unsupported centering\n";
@@ -944,19 +999,7 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
             componentNames.push_back(entry.first);
           }
 
-          vectorVarMap_[group.first] =
-              std::make_tuple(visitMeshName, componentNames);
-          if (md != nullptr) {
-            AddVectorVarToMetaData(md, group.first, visitMeshName,
-                                   vectorCentering,
-                                   static_cast<int>(componentCount));
-          }
-          debug2 << "[openpmd-api-plugin] Registered vector var '"
-                 << group.first << "' components="
-                 << JoinStrings(componentNames)
-                 << " centering=" << CenteringToString(vectorCentering)
-                 << " representativeMesh='" << representativeMeshName
-                 << "'\n";
+          registerVectorVar(group.first, componentNames, vectorCentering);
         } else {
           debug1 << "[openpmd-api-plugin] Mesh '" << group.first
                  << "' component count " << componentCount
@@ -973,14 +1016,7 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
             cent = vectorCentering;
           }
           if (cent != AVT_UNKNOWN_CENT) {
-            varMap_[varname] = std::tuple(visitMeshName, componentName);
-            if (md != nullptr) {
-              AddScalarVarToMetaData(md, varname, visitMeshName, cent);
-            }
-            debug2 << "[openpmd-api-plugin] Registered component var '"
-                   << varname << "' centering=" << CenteringToString(cent)
-                   << " representativeMesh='" << representativeMeshName
-                   << "'\n";
+            registerScalarVar(varname, componentName, cent, "component");
           } else {
             debug1 << "[openpmd-api-plugin] Skipping component '" << varname
                    << "' due to unsupported centering\n";
