@@ -14,6 +14,63 @@ SET(VISIT_PLUGIN_DIR "$ENV{HOME}/.visit/3.4.2/linux-x86_64/plugins" CACHE PATH
 SET(VISIT_PLUGIN_VS_INSTALL_FILE "/sw/andes/visit/3.4.2/linux-x86_64/include/PluginVsInstall.cmake"
     CACHE FILEPATH "Path to PluginVsInstall.cmake from the VisIt installation.")
 GET_FILENAME_COMPONENT(VISIT_PLUGIN_INCLUDE_DIR "${VISIT_PLUGIN_VS_INSTALL_FILE}" DIRECTORY)
+GET_FILENAME_COMPONENT(_VISIT_PLUGIN_INSTALL_PREFIX "${VISIT_PLUGIN_INCLUDE_DIR}" DIRECTORY)
+
+option(OPENPMD_USE_VISIT_MPI
+       "Use MPI libraries bundled with VisIt for openPMD-api."
+       ON)
+set(_OPENPMD_VISIT_MPI_AVAILABLE FALSE)
+if(OPENPMD_USE_VISIT_MPI)
+    set(_VISIT_MPI_INCLUDE_DIR
+        "${_VISIT_PLUGIN_INSTALL_PREFIX}/include/mpich/include")
+    set(_VISIT_MPI_LIBRARY_DIR "${_VISIT_PLUGIN_INSTALL_PREFIX}/lib")
+    set(_VISIT_MPIEXEC "${_VISIT_PLUGIN_INSTALL_PREFIX}/bin/mpiexec")
+
+    if(EXISTS "${_VISIT_MPI_INCLUDE_DIR}/mpi.h" AND
+       EXISTS "${_VISIT_MPI_LIBRARY_DIR}/libmpi${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        set(_OPENPMD_VISIT_MPI_AVAILABLE TRUE)
+        set(MPI_ASSUME_NO_BUILTIN_MPI TRUE CACHE BOOL
+            "Do not treat the base compiler as MPI-capable." FORCE)
+        set(MPI_SKIP_COMPILER_WRAPPER TRUE CACHE BOOL
+            "Use VisIt's bundled MPI paths instead of wrapper autodetection." FORCE)
+        set(MPI_SKIP_GUESSING TRUE CACHE BOOL
+            "Use VisIt's bundled MPI paths instead of fallback MPI guessing." FORCE)
+        if(EXISTS "${_VISIT_MPIEXEC}")
+            set(MPIEXEC_EXECUTABLE "${_VISIT_MPIEXEC}" CACHE FILEPATH
+                "VisIt's bundled MPI launcher." FORCE)
+        endif()
+
+        foreach(_VISIT_MPI_LANG C CXX)
+            unset(MPI_${_VISIT_MPI_LANG}_COMPILER CACHE)
+            set(MPI_${_VISIT_MPI_LANG}_HEADER_DIR "${_VISIT_MPI_INCLUDE_DIR}"
+                CACHE PATH "VisIt's bundled MPI include directory." FORCE)
+            set(MPI_${_VISIT_MPI_LANG}_COMPILER_INCLUDE_DIRS "" CACHE STRING
+                "MPI compiler wrapper include directories." FORCE)
+        endforeach()
+        set(MPI_C_ADDITIONAL_INCLUDE_DIRS "${_VISIT_MPI_INCLUDE_DIR}"
+            CACHE STRING "VisIt's bundled MPI C include directory." FORCE)
+        set(MPI_CXX_ADDITIONAL_INCLUDE_DIRS "${_VISIT_MPI_INCLUDE_DIR}"
+            CACHE STRING "VisIt's bundled MPI C++ include directory." FORCE)
+        set(MPI_C_LIB_NAMES mpi pmpi CACHE STRING
+            "VisIt's bundled MPI C libraries." FORCE)
+        set(MPI_CXX_LIB_NAMES mpicxx mpi pmpi CACHE STRING
+            "VisIt's bundled MPI C++ libraries." FORCE)
+        set(MPI_mpi_LIBRARY
+            "${_VISIT_MPI_LIBRARY_DIR}/libmpi${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            CACHE FILEPATH "VisIt's bundled MPI library." FORCE)
+        set(MPI_pmpi_LIBRARY
+            "${_VISIT_MPI_LIBRARY_DIR}/libpmpi${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            CACHE FILEPATH "VisIt's bundled PMPI library." FORCE)
+        set(MPI_mpicxx_LIBRARY
+            "${_VISIT_MPI_LIBRARY_DIR}/libmpicxx${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            CACHE FILEPATH "VisIt's bundled MPI C++ library." FORCE)
+    else()
+        message(WARNING
+            "OPENPMD_USE_VISIT_MPI is ON, but VisIt's bundled MPI was not "
+            "found under ${_VISIT_PLUGIN_INSTALL_PREFIX}; FindMPI will use "
+            "its normal search path.")
+    endif()
+endif()
 SET(_VISIT_LIBRARY_DEPENDENCIES_FILE_DEFAULT
     "${VISIT_PLUGIN_INCLUDE_DIR}/VisItLibraryDependencies.cmake")
 IF(NOT DEFINED VISIT_LIBRARY_DEPENDENCIES_FILE OR
@@ -116,12 +173,18 @@ option(OPENPMD_USE_VISIT_ADIOS2
        "Use ADIOS2 libraries bundled with VisIt for openPMD-api."
        ON)
 if(NOT DEFINED openPMD_USE_MPI OR openPMD_USE_MPI STREQUAL "AUTO")
-    set(openPMD_USE_MPI OFF CACHE STRING
-        "MPI backend; disabled by default to avoid mixing VisIt's bundled MPI with external ADIOS2/MPI runtimes."
-        FORCE)
+    if(_OPENPMD_VISIT_MPI_AVAILABLE AND VISIT_PARALLEL)
+        set(openPMD_USE_MPI ON CACHE STRING
+            "MPI backend; enabled by default with VisIt's bundled MPI."
+            FORCE)
+    else()
+        set(openPMD_USE_MPI OFF CACHE STRING
+            "MPI backend; disabled by default when VisIt's bundled MPI is unavailable."
+            FORCE)
+    endif()
 else()
     set(openPMD_USE_MPI "${openPMD_USE_MPI}" CACHE STRING
-        "MPI backend; disabled by default to avoid mixing VisIt's bundled MPI with external ADIOS2/MPI runtimes.")
+        "MPI backend; use OPENPMD_USE_VISIT_MPI=OFF to opt into external MPI discovery.")
 endif()
 set_property(CACHE openPMD_USE_MPI PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
 if(NOT DEFINED openPMD_USE_HDF5 OR openPMD_USE_HDF5 STREQUAL "AUTO")
@@ -188,16 +251,22 @@ endforeach()
 
 set_target_properties(adios2::cxx11 PROPERTIES
   IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11${CMAKE_SHARED_LIBRARY_SUFFIX}\"
-  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\"
+  INTERFACE_LINK_LIBRARIES \"${VISIT_LIBRARY_DIR}/libadios2_core${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_perfstubs${CMAKE_SHARED_LIBRARY_SUFFIX}\")
 set_target_properties(adios2::cxx11_mpi PROPERTIES
   IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi${CMAKE_SHARED_LIBRARY_SUFFIX}\"
-  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\"
+  INTERFACE_COMPILE_DEFINITIONS \"ADIOS2_USE_MPI=1\"
+  INTERFACE_LINK_LIBRARIES \"${VISIT_LIBRARY_DIR}/libadios2_cxx11${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_core_mpi${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_core${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_perfstubs${CMAKE_SHARED_LIBRARY_SUFFIX}\")
 set_target_properties(adios2::cxx PROPERTIES
   IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11${CMAKE_SHARED_LIBRARY_SUFFIX}\"
-  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\"
+  INTERFACE_LINK_LIBRARIES \"${VISIT_LIBRARY_DIR}/libadios2_core${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_perfstubs${CMAKE_SHARED_LIBRARY_SUFFIX}\")
 set_target_properties(adios2::cxx_mpi PROPERTIES
   IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libadios2_cxx11_mpi${CMAKE_SHARED_LIBRARY_SUFFIX}\"
-  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\")
+  INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/adios2/include\"
+  INTERFACE_COMPILE_DEFINITIONS \"ADIOS2_USE_MPI=1\"
+  INTERFACE_LINK_LIBRARIES \"${VISIT_LIBRARY_DIR}/libadios2_cxx11${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_core_mpi${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_core${CMAKE_SHARED_LIBRARY_SUFFIX};${VISIT_LIBRARY_DIR}/libadios2_perfstubs${CMAKE_SHARED_LIBRARY_SUFFIX}\")
 ")
     file(WRITE "${_VISIT_ADIOS2_SHIM_DIR}/adios2-config-version.cmake"
 "set(PACKAGE_VERSION 2.10.0)
