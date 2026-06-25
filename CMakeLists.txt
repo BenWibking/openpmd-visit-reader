@@ -133,6 +133,33 @@ else()
         "HDF5 backend (.h5 files); disabled by default to avoid conflicts with VisIt's imported HDF5 targets.")
 endif()
 set_property(CACHE openPMD_USE_HDF5 PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
+option(OPENPMD_USE_VISIT_HDF5
+       "Use HDF5 libraries bundled with VisIt for openPMD-api."
+       ON)
+if(OPENPMD_USE_VISIT_HDF5 AND
+   NOT openPMD_USE_HDF5 STREQUAL "OFF" AND
+   NOT openPMD_USE_HDF5 STREQUAL "FALSE")
+    set(openPMD_USE_HDF5 ON CACHE STRING
+        "HDF5 backend (.h5 files)." FORCE)
+    set_property(CACHE openPMD_USE_HDF5 PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
+
+    # Point cmake's own FindHDF5 at VisIt's HDF5 so it derives version and
+    # parallel support from the actual headers.
+    #
+    # HDF5_ROOT restricts all find_program/find_path/find_library calls inside
+    # FindHDF5 to NO_DEFAULT_PATH, preventing h5cc/h5pcc or a system HDF5
+    # cmake config from being picked up instead.
+    #
+    # HDF5_C_INCLUDE_DIR must still be seeded explicitly because VisIt's headers
+    # sit at include/hdf5/include/ rather than the standard include/ location
+    # that HDF5_ROOT alone would reach.
+    get_filename_component(_VISIT_INSTALL_PREFIX "${VISIT_ROOT_INCLUDE_DIR}" DIRECTORY)
+    set(HDF5_ROOT "${_VISIT_INSTALL_PREFIX}" CACHE PATH
+        "VisIt install prefix; restricts FindHDF5 to VisIt's HDF5." FORCE)
+    set(HDF5_NO_FIND_PACKAGE_CONFIG_FILE TRUE CACHE BOOL "" FORCE)
+    set(HDF5_C_INCLUDE_DIR "${VISIT_ROOT_INCLUDE_DIR}/hdf5/include"
+        CACHE PATH "VisIt bundled HDF5 include dir" FORCE)
+endif()
 if(OPENPMD_USE_VISIT_ADIOS2 AND
    NOT openPMD_USE_ADIOS2 STREQUAL "OFF" AND
    NOT openPMD_USE_ADIOS2 STREQUAL "FALSE")
