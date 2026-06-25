@@ -133,6 +133,42 @@ else()
         "HDF5 backend (.h5 files); disabled by default to avoid conflicts with VisIt's imported HDF5 targets.")
 endif()
 set_property(CACHE openPMD_USE_HDF5 PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
+option(OPENPMD_USE_VISIT_HDF5
+       "Use HDF5 libraries bundled with VisIt for openPMD-api."
+       ON)
+if(OPENPMD_USE_VISIT_HDF5 AND
+   NOT openPMD_USE_HDF5 STREQUAL "OFF" AND
+   NOT openPMD_USE_HDF5 STREQUAL "FALSE")
+    set(openPMD_USE_HDF5 ON CACHE STRING
+        "HDF5 backend (.h5 files)." FORCE)
+    set_property(CACHE openPMD_USE_HDF5 PROPERTY STRINGS ON TRUE AUTO OFF FALSE)
+
+    set(_VISIT_HDF5_SHIM_DIR "${openpmd_database_BINARY_DIR}/visit-hdf5-cmake")
+    file(MAKE_DIRECTORY "${_VISIT_HDF5_SHIM_DIR}")
+    file(WRITE "${_VISIT_HDF5_SHIM_DIR}/FindHDF5.cmake"
+"# Shim: redirect find_package(HDF5) to VisIt's bundled HDF5.
+set(HDF5_FOUND TRUE)
+set(HDF5_VERSION \"1.8.14\")
+set(HDF5_C_FOUND TRUE)
+set(HDF5_INCLUDE_DIRS \"${VISIT_ROOT_INCLUDE_DIR}/hdf5/include\")
+set(HDF5_C_INCLUDE_DIRS \"${VISIT_ROOT_INCLUDE_DIR}/hdf5/include\")
+set(HDF5_LIBRARIES \"${VISIT_LIBRARY_DIR}/libhdf5${CMAKE_SHARED_LIBRARY_SUFFIX}\")
+set(HDF5_C_LIBRARIES \"${VISIT_LIBRARY_DIR}/libhdf5${CMAKE_SHARED_LIBRARY_SUFFIX}\")
+set(HDF5_C_LIBRARY_hdf5 \"${VISIT_LIBRARY_DIR}/libhdf5${CMAKE_SHARED_LIBRARY_SUFFIX}\")
+set(HDF5_DEFINITIONS \"\")
+set(HDF5_IS_PARALLEL FALSE)
+set(HDF5_ENABLE_PARALLEL FALSE)
+set(HDF5_PROVIDES_PARALLEL FALSE)
+
+if(NOT TARGET hdf5::hdf5)
+  add_library(hdf5::hdf5 SHARED IMPORTED)
+  set_target_properties(hdf5::hdf5 PROPERTIES
+    IMPORTED_LOCATION \"${VISIT_LIBRARY_DIR}/libhdf5${CMAKE_SHARED_LIBRARY_SUFFIX}\"
+    INTERFACE_INCLUDE_DIRECTORIES \"${VISIT_ROOT_INCLUDE_DIR}/hdf5/include\")
+endif()
+")
+    list(PREPEND CMAKE_MODULE_PATH "${_VISIT_HDF5_SHIM_DIR}")
+endif()
 if(OPENPMD_USE_VISIT_ADIOS2 AND
    NOT openPMD_USE_ADIOS2 STREQUAL "OFF" AND
    NOT openPMD_USE_ADIOS2 STREQUAL "FALSE")
