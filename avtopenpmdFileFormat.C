@@ -893,6 +893,17 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
         debug1 << "[openpmd-api-plugin] Cached structured boundaries for mesh '"
                << visitMeshName << "' timeState=" << timeState << "\n";
       }
+
+      avtStructuredDomainNesting *nesting =
+          BuildDomainNesting(cachedHierarchy);
+      if (nesting != nullptr) {
+        void_ref_ptr nestVr(nesting, avtStructuredDomainNesting::Destruct);
+        cache->CacheVoidRef("any_mesh",
+                            AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION,
+                            timeState, -1, nestVr);
+        debug1 << "[openpmd-api-plugin] Cached domain nesting for mesh '"
+               << visitMeshName << "' timeState=" << timeState << "\n";
+      }
     }
 #else
     debug2 << "[openpmd-api-plugin] Skipping structured boundary cache for mesh '"
@@ -918,8 +929,7 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
       meshMd->groupTitle = "levels";
       meshMd->groupPieceName = "level";
       meshMd->blockNames = hierarchy.blockNames;
-      meshMd->containsGhostZones = AVT_HAS_GHOSTS;
-      meshMd->presentGhostZoneTypes = (1 << AVT_NESTING_GHOST_ZONES);
+      meshMd->containsGhostZones = AVT_NO_GHOSTS;
       md->Add(meshMd);
       md->AddGroupInformation(hierarchy.numLevels,
                               static_cast<int>(hierarchy.patches.size()),
@@ -1397,23 +1407,7 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
     return true;
   };
 
-  if (type != nullptr &&
-      strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
-    std::string meshNameResolved;
-    const MeshPatchHierarchy *hier = nullptr;
-    if (!resolveMesh(meshNameResolved, hier)) {
-      return NULL;
-    }
-    return avtMTMDFileFormat::GetAuxiliaryData(meshNameResolved.c_str(),
-                                               timestep, domain, type, args,
-                                               df);
-  }
-
   if (type != nullptr) {
-    if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
-      debug2 << "[openpmd-api-plugin] Delegating domain boundary request to base cache" << "\n";
-      return avtMTMDFileFormat::GetAuxiliaryData(var, timestep, domain, type, args, df);
-    }
     const MeshPatchHierarchy *hierarchyPtr = nullptr;
     std::string meshName;
     auto requireHierarchy = [&]() -> bool {
@@ -1422,6 +1416,23 @@ void *avtopenpmdFileFormat::GetAuxiliaryData(const char *var, int timestep,
       }
       return resolveMesh(meshName, hierarchyPtr);
     };
+
+    if (strcmp(type, AUXILIARY_DATA_DOMAIN_BOUNDARY_INFORMATION) == 0) {
+      if (!requireHierarchy()) {
+        return NULL;
+      }
+      const MeshPatchHierarchy &hierarchy = *hierarchyPtr;
+      debug2 << "[openpmd-api-plugin] Building domain boundary info for mesh '"
+             << meshName << "'\n";
+      avtStructuredDomainBoundaries *dbi =
+          BuildStructuredDomainBoundaries(hierarchy);
+      if (dbi == nullptr) {
+        debug1 << "[openpmd-api-plugin] Domain boundary build returned nullptr\n";
+        return NULL;
+      }
+      df = avtStructuredDomainBoundaries::Destruct;
+      return dbi;
+    }
 
     if (strcmp(type, AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION) == 0) {
       if (!requireHierarchy()) {
@@ -1767,7 +1778,7 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
       patch.storageExtentCanonical = storageExtentCanonical;
 
       openPMD::Offset vtkOffset(3, 0);
-      openPMD::Extent vtkExtent(3, 1);
+      openPMD::Extent vtkExtent(3, 0);
       std::array<int, 3> storageToVtk{{-1, -1, -1}};
       for (size_t axis = 0; axis < 3; ++axis) {
         int storageIndex = -1;
@@ -1804,6 +1815,11 @@ MeshPatchHierarchy avtopenpmdFileFormat::CreateHierarchyForGroup(
       patch.storageToVtk = storageToVtk;
       patch.offset = vtkOffset;
       patch.extent = vtkExtent;
+
+      for (int axis = hierarchy.topologicalDim; axis < 3; ++axis) {
+        patch.extent[axis] = 0;
+        patch.offset[axis] = 0;
+      }
 
       for (int axis = 0; axis < 3; ++axis) {
         double spacing = spacingPerAxis[axis];
@@ -1881,7 +1897,7 @@ avtopenpmdFileFormat::CreateRectilinearPatch(const PatchInfo &patch) const {
 
   for (int axis = 0; axis < 3; ++axis) {
     const uint64_t cells =
-        axis < static_cast<int>(patch.extent.size()) ? patch.extent[axis] : 1;
+        axis < static_cast<int>(patch.extent.size()) ? patch.extent[axis] : 0;
     int nodes = static_cast<int>(cells);
     if (patch.centering == AVT_ZONECENT) {
       nodes = static_cast<int>(cells + 1);
@@ -2142,12 +2158,11 @@ avtopenpmdFileFormat::BuildStructuredDomainBoundaries(
     for (int axis = 0; axis < 3; ++axis) {
       if (axis >= hierarchy.topologicalDim) {
         extents[2 * axis] = 0;
-        extents[2 * axis + 1] = 1;
+        extents[2 * axis + 1] = 0;
         continue;
       }
       extents[2 * axis] = patch.logicalLower[axis];
-      int upperExclusive = patch.logicalUpper[axis] + 1;
-      extents[2 * axis + 1] = upperExclusive;
+      extents[2 * axis + 1] = patch.logicalUpper[axis] + 1;
     }
     debug5 << "[openpmd-api-plugin] StructuredBoundaries patch=" << patchIdx
            << " level=" << (patchIdx < hierarchy.levelIdsPerPatch.size()
@@ -2162,6 +2177,19 @@ avtopenpmdFileFormat::BuildStructuredDomainBoundaries(
     }
     boundaries->SetIndicesForAMRPatch(static_cast<int>(patchIdx), level,
                                       extents);
+  }
+
+  if (hierarchy.numLevels > 1 &&
+      !hierarchy.levelRefinementRatios.empty()) {
+    std::vector<std::vector<int>> refRatios(hierarchy.numLevels,
+                                            std::vector<int>(3, 1));
+    for (int lev = 1; lev < hierarchy.numLevels; ++lev) {
+      if (lev - 1 < static_cast<int>(hierarchy.levelRefinementRatios.size())) {
+        const auto &ratio = hierarchy.levelRefinementRatios[lev - 1];
+        refRatios[lev] = {ratio[0], ratio[1], ratio[2]};
+      }
+    }
+    boundaries->SetRefinementRatios(refRatios);
   }
 
   boundaries->CalculateBoundaries();
@@ -3020,9 +3048,6 @@ vtkDataSet *avtopenpmdFileFormat::GetMesh(int timeState, int domain,
   LogPatchSummary(patch, ctx.str());
 
   vtkDataSet *grid = CreateRectilinearPatch(patch);
-  if (auto *rect = vtkRectilinearGrid::SafeDownCast(grid)) {
-    AddGhostZonesForPatch(hierarchy, domain, rect);
-  }
   debug1 << "[openpmd-api-plugin] GetMesh success mesh='" << meshName
          << "' domain=" << domain << "\n";
   return grid;
