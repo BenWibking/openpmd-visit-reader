@@ -901,6 +901,9 @@ void avtopenpmdFileFormat::PopulateHierarchyCache(
         cache->CacheVoidRef("any_mesh",
                             AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION,
                             timeState, -1, nestVr);
+        cache->CacheVoidRef(visitMeshName.c_str(),
+                            AUXILIARY_DATA_DOMAIN_NESTING_INFORMATION,
+                            timeState, -1, nestVr);
         debug1 << "[openpmd-api-plugin] Cached domain nesting for mesh '"
                << visitMeshName << "' timeState=" << timeState << "\n";
       }
@@ -2181,12 +2184,12 @@ avtopenpmdFileFormat::BuildStructuredDomainBoundaries(
 
   if (hierarchy.numLevels > 1 &&
       !hierarchy.levelRefinementRatios.empty()) {
-    std::vector<std::vector<int>> refRatios(hierarchy.numLevels,
+    std::vector<std::vector<int>> refRatios(hierarchy.numLevels - 1,
                                             std::vector<int>(3, 1));
     for (int lev = 1; lev < hierarchy.numLevels; ++lev) {
       if (lev - 1 < static_cast<int>(hierarchy.levelRefinementRatios.size())) {
         const auto &ratio = hierarchy.levelRefinementRatios[lev - 1];
-        refRatios[lev] = {ratio[0], ratio[1], ratio[2]};
+        refRatios[lev - 1] = {ratio[0], ratio[1], ratio[2]};
       }
     }
     boundaries->SetRefinementRatios(refRatios);
